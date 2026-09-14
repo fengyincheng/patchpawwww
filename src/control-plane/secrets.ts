@@ -51,11 +51,16 @@ async function currentWindowsAccount(): Promise<WindowsAccount> {
  * inherited defaults.
  */
 async function protectWindowsPath(path: string, directory: boolean, account: WindowsAccount) {
-  await runWindowsCommand('powershell.exe', [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-File', windowsAclScript, path, account.sid, 'set', directory ? 'directory' : 'file',
-  ]);
-  await verifyWindowsPath(path, directory, account);
+  try {
+    await runWindowsCommand('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', windowsAclScript, path, account.sid, 'set', directory ? 'directory' : 'file',
+    ]);
+    await verifyWindowsPath(path, directory, account);
+  } catch (error) {
+    console.error('WINDOWS_ACL_FAILURE', path, directory ? 'directory' : 'file', error instanceof Error ? error.message : String(error));
+    throw error;
+  }
 }
 
 async function readWindowsAcl(path: string): Promise<WindowsAcl> {
