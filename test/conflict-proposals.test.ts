@@ -241,7 +241,7 @@ test('/close cancels an unpublished Conflict proposal before its ordered start n
   const path = statePath(join(f.root, 'data/state'), 'owner/lab', 7);
   f.control.commentStatus = 201; await f.mention('@patchpawwww /close', 101);
   const result = await runPullRequest(f.config, 'owner/lab', 7);
-  assert.equal(result.status, 'closed', JSON.stringify(result));
+  assert.equal(result.status, 'closed');
   const proposal = (await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 })).find(value => value.item.purpose === 'conflict_proposal')!;
   assert.equal(proposal.item.status, 'cancelled_stale'); assert.equal(proposal.item.lifecycle_status, 'finalized');
   assert.equal((await readState(path))?.phase, 'closed');

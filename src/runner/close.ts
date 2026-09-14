@@ -33,6 +33,25 @@ export interface CloseJournal {
   last_step: string; last_error: string | null;
 }
 const journalPath = (path: string) => `${path}.close.json`;
+
+// Windows cannot unlink a database file while SQLite is releasing its last handle.
+// The close path already owns the database lifecycle, so a short bounded retry is
+// safe here and preserves the journal's failure semantics for a genuinely stuck file.
+async function removeMemoryFile(path: string) {
+  const attempts = process.platform === 'win32' ? 30 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await rm(path, { force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retryable = process.platform === 'win32' && ['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '');
+      if (!retryable || attempt === attempts - 1) throw error;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+}
+
 async function readJournal(path: string): Promise<CloseJournal | null> {
   try { return JSON.parse(await readFile(journalPath(path), 'utf8')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
@@ -189,7 +208,7 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
     // No PR-scoped refs exist in the P0 repo-store (exact-SHA fetches only); the step remains
     // explicit so a future refs/patchpaw/pr/<n>/… design has a sequenced home.
     ['refs', async () => {}],
-    ['memory', async () => { for (const suffix of ['', '-wal', '-shm']) await rm(`${memoryFile}${suffix}`, { force: true }); }],
+    ['memory', async () => { for (const suffix of ['', '-wal', '-shm']) await removeMemoryFile(`${memoryFile}${suffix}`); }],
     ['runs', async () => { for (const run of journal.run_ids) await rm(join(patchpawPaths(config.root).runs, run), { recursive: true, force: true }); }],
     ['proposals', async () => { await rm(conflictProposalDirectory(path), { recursive: true, force: true }); }],
     ['snapshots', async () => { await rm(snapshots, { recursive: true, force: true }); }],
