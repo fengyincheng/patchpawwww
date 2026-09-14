@@ -1,0 +1,14 @@
+node_modules/
+/node_modules
+.env
+.env.*
+!.env.example
+spike/results/
+spike/snapshots/
+spike/conflict/workspaces/
+spike/conflict/selection.git/
+docs/资源/
+docs/_handoff/
+.secrets/
+var/
+/web/dist/

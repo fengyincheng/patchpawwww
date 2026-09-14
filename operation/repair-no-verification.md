@@ -1,0 +1,1 @@
+未提交验证请求。准备好后调用 request_repair_verification；若被阻塞则调用 request_human_help。最终回复文本不会提交结果。
