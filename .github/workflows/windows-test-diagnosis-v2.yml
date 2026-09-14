@@ -24,5 +24,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Exercise native ACL helper
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'patchpaw-acl-probe'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          $sid = ((whoami /user | Select-String -Pattern 'S-\d-\d+(?:-\d+)+').Matches.Value)
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows/protect-acl.ps1 $probe $sid set directory
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows/protect-acl.ps1 $probe '' verify directory
+
       - name: Run test files one at a time
         run: node --import tsx scripts/run-test-files.ts
