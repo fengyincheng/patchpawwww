@@ -19,7 +19,22 @@ function Convert-RuleToJson($Rule) {
   }
 }
 
-$acl = Get-Acl -LiteralPath $Path
+function Get-PathAcl {
+  if ($Kind -eq 'directory') {
+    return [System.IO.Directory]::GetAccessControl($Path)
+  }
+  return [System.IO.File]::GetAccessControl($Path)
+}
+
+function Set-PathAcl($Acl) {
+  if ($Kind -eq 'directory') {
+    [System.IO.Directory]::SetAccessControl($Path, $Acl)
+    return
+  }
+  [System.IO.File]::SetAccessControl($Path, $Acl)
+}
+
+$acl = Get-PathAcl
 
 if ($Mode -eq 'set') {
   if ([string]::IsNullOrWhiteSpace($Sid)) {
@@ -49,8 +64,8 @@ if ($Mode -eq 'set') {
     [System.Security.AccessControl.AccessControlType]::Allow
   )
   $acl.AddAccessRule($rule)
-  Set-Acl -LiteralPath $Path -AclObject $acl
-  $acl = Get-Acl -LiteralPath $Path
+  Set-PathAcl $acl
+  $acl = Get-PathAcl
 }
 
 $entries = @($acl.Access | ForEach-Object { Convert-RuleToJson $_ })
