@@ -41,4 +41,4 @@ jobs:
         run: node --import tsx scripts/windows/probe-node-command.ts
 
       - name: Run test files one at a time
-        run: node --import tsx scripts/run-test-files.ts test/conflict-proposals.test.ts
+        run: node --import tsx scripts/run-test-files.ts test/admin-api.test.ts test/close.test.ts test/comment-loop.test.ts test/communication-store.test.ts test/conflict-proposals.test.ts
