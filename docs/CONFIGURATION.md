@@ -14,11 +14,13 @@ PatchPaw 从项目根目录的 `.env` 读取启动配置。请以 `.env.example`
 | `PATCHPAW_PORT` | 本机监听端口。 |
 | `PATCHPAW_GITHUB_TEST_REPO` | 事件处理路径使用的 `owner/repository`。 |
 
-生产环境推荐 `PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com`，由反向代理终止 TLS。localhost 开发可以使用明确的 `http://localhost:3000`，但不要把 HTTP 当作生产配置。公开来源地址、GitHub App Webhook URL 和浏览器地址必须一致。
+生产环境推荐 `PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com`，由反向代理终止 TLS。localhost 开发可以使用明确的 `http://localhost:3000`，但不要把 HTTP 当作生产配置。公开来源、浏览器和 Webhook 的 scheme、host、port 应一致；Webhook 另加 `/github/webhook` 路径。
 
 ## 管理员 token
 
-运行 `npm run generate:admin-token`，把唯一输出行放入服务端 `.env` 的 `PATCHPAW_ADMIN_TOKEN` 后重启。token 不写文件、不持久化、不回显；丢失后只能生成替代 token。替换并重启会使内存中的旧会话失效。
+运行 `npm run generate:admin-token`，把唯一输出行放入服务端 `.env` 的 `PATCHPAW_ADMIN_TOKEN` 后重启。生成器不会写文件，服务端不会通过 API 回显 token；丢失后只能生成替代 token。替换并重启会使内存中的旧会话失效。
+
+控制台部署必须填写 token；保留空的 `PATCHPAW_ADMIN_TOKEN=` 会导致启动校验失败。
 
 ## Provider
 
@@ -26,7 +28,7 @@ PatchPaw 从项目根目录的 `.env` 读取启动配置。请以 `.env.example`
 
 ## 运行目录
 
-`PATCHPAW_HOME` 是可选覆盖。未设置时 Linux/macOS 使用 `~/.patchpaw`，Windows 使用 `%USERPROFILE%\\.patchpaw`。运行目录包含持久数据库、仓库缓存、工作区、执行记录、快照、日志、备份、锁和凭据引用；它不是可以随意清理的缓存。迁移、备份和恢复前先确认路径，并限制服务账号访问权限。
+`PATCHPAW_HOME` 是可选覆盖。未设置时 Linux/macOS 使用 `~/.patchpaw`。原生 Windows 暂不支持。运行目录包含持久数据库、仓库缓存、工作区、执行记录、快照、日志、备份、锁和凭据引用；它不是可以随意清理的缓存。迁移、备份和恢复前先确认路径，并限制服务账号访问权限。
 
 ## 修改配置后的检查
 

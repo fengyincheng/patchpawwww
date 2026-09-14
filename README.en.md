@@ -1,99 +1,212 @@
 # PatchPaw
 
-PatchPaw is a self-hosted GitHub App service. It receives signed Pull Request and issue-comment events, runs repository-configured review, CI repair, conflict analysis, and conversation tasks, and publishes results back to GitHub. It also provides a React control plane for repositories, Prompts, Skills, models, and commands.
+A self-hosted GitHub App for PR conversations, code reviews, CI repair and conflict analysis, with a web console for repositories, models, prompts, skills and commands.
 
-[简体中文主文档](README.md)
+[中文](README.md) · [Operations](docs/OPERATIONS.md) · [Security model](docs/SECURITY-MODEL.md) · [Contributing](CONTRIBUTING.md)
 
-## Read the security boundary first
+This is an early release for operators comfortable maintaining their own deployment. Linux and macOS are supported; Linux is recommended for production. **Native Windows is not currently supported. No official Docker image is available. A Linux container image usable through Docker on Windows may be considered in the future; there is no release date.**
 
-PatchPaw executes Git, validation, and model-generated commands in a target repository workspace. The application is not a container or sandbox. Run untrusted repositories under an isolated service account, container, or virtual machine. Production operators must provide HTTPS, restrict the runtime account, and protect the runtime home, `.env`, GitHub App private key, webhook secret, and provider credentials.
+## Prerequisites
 
-Command permission is explicit: `review`, ordinary conversation, and conflict analysis are read-only by default; `repair` and `ci` paths can be read-write and may commit, push, or post GitHub comments. Opening a Pull Request, receiving a passive PR event, or running a health check does not automatically start a model task.
+- A persistent Linux host or macOS, Node.js **22.x, version 22.22.0 or newer**, npm and Git.
+- A domain or subdomain you control, with DNS and an HTTPS reverse proxy.
+- Permission to register a GitHub App and install it on your target repositories.
+- A model API credential. Supported provider types: Zhipu/Z.ai, DeepSeek, OpenRouter, Kimi and Qwen. Check model availability, endpoints, costs and data policies yourself.
+- The target repository's toolchain, such as Python, compilers or package managers. PatchPaw does not provision every project's dependencies.
 
-## Architecture
+PatchPaw does not provide hosting, domains or model credits. It executes repository code and model-generated commands and **is not a security sandbox**. Use a dedicated non-root account and an isolated host or VM for untrusted PRs. Do not share the execution environment with unrelated sensitive credentials.
 
-- The GitHub App handles installation authorization and webhook signing; the server verifies events and reads GitHub state.
-- The control-plane database stores repository-scoped Prompts, Skills, Providers, Models, Commands, and the read-only conversation profile.
-- Each execution receives an immutable effective-configuration snapshot; evidence, logs, and workspace state live under the runtime home.
-- Unauthenticated `/api/setup` exposes only the origin, derived webhook URL, HTTPS status, and whether admin authentication is configured. It never exposes credentials or paths.
-- The frontend uses relative API URLs and an HttpOnly session cookie. The admin token is sent only in the login request and has no readback endpoint.
+## 1. Choose one public origin
 
-## Requirements
+For `https://patchpaw.example.com`:
 
-- Node.js 22.22.0 or a compatible newer release
-- Git
-- A GitHub App installed on the repositories it should manage
-- A public HTTPS domain for a reverse proxy/TLS endpoint (an explicit localhost HTTP origin is suitable for local development)
-- At least one supported model-provider credential; model requests may incur provider charges and are subject to provider data terms
+| Purpose | URL |
+| --- | --- |
+| Web console | `https://patchpaw.example.com/` |
+| GitHub App webhook | `https://patchpaw.example.com/github/webhook` |
+| Public setup information | `https://patchpaw.example.com/api/setup` |
+| Health endpoint | `https://patchpaw.example.com/health` |
 
-PatchPaw's native Node runtime supports Linux, macOS, and Windows. A target repository's own validation commands may still require a particular shell or toolchain.
+**The frontend, API and webhook share one domain and server process.** There is no separate frontend server to deploy. Set `PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com`, without a subpath or webhook suffix. This declares the public origin; it does not configure DNS, certificates or network bindings.
 
-## Install and first start
+## 2. Register and install your GitHub App
+
+Open your personal or organization **Settings → Developer settings → GitHub Apps → New GitHub App**. For personal accounts, start at [GitHub App settings](https://github.com/settings/apps).
+
+### Registration fields
+
+| Field | Value |
+| --- | --- |
+| GitHub App name | A globally unique name, e.g. `my-team-patchpaw` |
+| Homepage URL | Your public origin |
+| Callback URL / Setup URL | Leave blank; the console does not use GitHub OAuth |
+| Request user authorization (OAuth) during installation | Unchecked |
+| Enable Device Flow | Unchecked |
+| Webhook → Active | Checked |
+| Webhook URL | `https://patchpaw.example.com/github/webhook` |
+| Webhook secret | A random secret; use the exact same value in your server configuration |
+| SSL verification | Enabled |
+
+Generate a webhook secret and store it privately. Use a separate value for the admin token:
+
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+### Repository permissions
+
+| Permission | Access | Purpose |
+| --- | --- | --- |
+| Metadata | Read-only, provided automatically | Repository metadata |
+| Contents | Read-only; Read and write for repair pushes | Fetch code and push repairs |
+| Pull requests | Read and write | Read PRs, publish reviews and PR comments |
+| Commit statuses | Read-only | Read commit status |
+| Checks | Read-only | Read check results |
+| Actions | Read-only | Read workflow runs, jobs and failure logs |
+| Workflows | No access by default; Read and write only for workflow edits | Push changes under `.github/workflows/*` |
+
+Leave other permissions at No access, including organization/account permissions and Administration. A separate Issues write grant is not needed for the current PR comment flow: GitHub accepts Pull requests write permission for that endpoint. GitHub grants and individual command permissions are separate controls.
+
+### Events and installation
+
+Subscribe to **Pull request** and **Issue comment**. The latter covers ordinary comments on a PR's Conversation tab, not inline review comments. Do not substitute Pull request review comment. Push, Check run and Workflow run subscriptions are not required; CI information is fetched during execution.
+
+For installation scope, select **Only on this account** for personal use, or **Any account** if other accounts/organizations need to install the App. After creation:
+
+1. Record the **App ID**, not Client ID or Installation ID.
+2. Confirm the slug from `https://github.com/apps/<slug>`.
+3. Use **Private keys → Generate a private key** and download the PEM.
+4. Open **Install App → Install**, choose the account and **Only select repositories**, then select your target repositories. Registration alone does not grant repository access.
+5. When you later add permissions, the installation owner must approve the changes.
+
+An initial ping may fail before the server is running. Check deliveries after deployment. References: [registration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app), [permissions](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app), [PR comment endpoint permissions](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
+
+## 3. Install and configure
+
+Run as the account that will run the service:
 
 ```sh
 git clone https://github.com/fengyincheng/patchpawwww.git
 cd patchpawwww
 npm ci
 cp .env.example .env
-npm run generate:admin-token
-npm run check
-npm test
-npm run build
-npm run start
-```
-
-In Windows PowerShell, use `Copy-Item .env.example .env`; the npm commands are the same. Put the single line printed by the token generator in the server-only `.env`; do not write command output to the repository or logs. `npm run start` listens on the local host by default and should be published through a reverse proxy in production.
-
-## Create the GitHub App, domain, and webhook
-
-1. Create a GitHub App for this deployment, choose a unique App slug and App ID, and install it only on the repositories that need access.
-2. Set `PATCHPAW_PUBLIC_ORIGIN` to the public scheme and host with no path, such as `https://patchpaw.example.com`. The browser origin, this value, and the GitHub App webhook URL must use the same origin.
-3. Set the GitHub App webhook URL to `https://patchpaw.example.com/github/webhook` and create a new random webhook secret. Enable the events required by the deployment: `pull_request` and `issue_comment`; enable installation events only if installation-state synchronization is needed.
-4. Grant minimum repository permissions: Metadata is at least Read; enable Pull requests, Issues/issue comments, Contents, Checks/Actions, and other permissions only for flows that use them. A repair command that commits or pushes needs Contents write; read-only review should not have write access.
-5. Download the App private key once, store it outside the repository or in a restricted secrets directory, and set `PATCHPAW_GITHUB_PRIVATE_KEY_PATH`. Never commit the PEM file. Rotate the webhook secret and private key independently; revoke and regenerate immediately after suspected exposure.
-6. Point DNS at a reverse proxy. The proxy terminates TLS and forwards `/`, `/api/*`, and `/github/webhook` to the local PatchPaw listener while preserving the expected host/origin behavior. Do not cache `/api/setup` or admin API responses.
-
-The login page and Settings display the configured origin, derived webhook URL, HTTPS status, token status, and a comparison with `window.location.origin`. If they show a mismatch, fix DNS, proxy routing, and `PATCHPAW_PUBLIC_ORIGIN` before attempting to log in. Restart after changing environment variables.
-
-## Admin login credential
-
-```sh
+chmod 600 .env
+mkdir -p secrets
+chmod 700 secrets
 npm run generate:admin-token
 ```
 
-The command uses the system cryptographic random source to generate a 32-byte, 64-hex-character token. It prints exactly one line, writes no file, persists no value, and has no API recovery or readback endpoint. Put it in the server-only `.env` as `PATCHPAW_ADMIN_TOKEN`, restart, and enter it on the HTTPS login page. The browser receives only a short-lived HttpOnly session cookie; the built frontend assets contain no token.
-
-To rotate, generate a replacement, update `.env`, and restart. Restarting clears in-memory sessions, invalidating prior logins. A lost token cannot be recovered; generate and configure a replacement. Keep it out of Vite public variables, browser local storage, shell history, CI logs, and issues.
-
-## Environment summary
-
-`.env.example` is the complete generic template. Required values include the GitHub App ID/slug, webhook secret, private-key path, public origin, listener port, and target repository. `PATCHPAW_ADMIN_TOKEN` is required for control-plane login but is intentionally blank in the template. `ZAI_*` values can initialize the first control-plane provider; Providers can subsequently be managed in Models, where the UI shows only credential status and never echoes a secret.
-
-When `PATCHPAW_HOME` is empty, durable state is stored in `~/.patchpaw` on Linux/macOS and `%USERPROFILE%\\.patchpaw` on Windows (normally `C:\\Users\\<user>\\.patchpaw`). It is not disposable cache: it contains databases, repository caches, workspaces, runs, snapshots, logs, backups, locks, and server-side credential references. Set `PATCHPAW_HOME` for another disk or service identity and protect it with OS permissions; on Windows configure an NTFS ACL limited to the service account.
-
-## Safe checks and side effects
-
-Run local verification in this order:
+Save the generated admin token in a password manager and your server-side `.env`. Upload the App PEM as `secrets/github-app.private-key.pem` and restrict access:
 
 ```sh
-npm run check
-npm test
-npm run build
+chmod 600 secrets/github-app.private-key.pem
 ```
 
-These commands should not create GitHub branches, Pull Requests, commits, or model requests (apart from test fixtures). `npm run verify:frontend -- <url>` only compares built frontend assets; never pass a real token as a command argument.
+Replace every placeholder in `.env`:
 
-The following operations can change external or durable state and require explicit approval and backups:
+```dotenv
+PATCHPAW_GITHUB_APP_ID=123456
+PATCHPAW_GITHUB_APP_SLUG=my-team-patchpaw
+PATCHPAW_GITHUB_WEBHOOK_SECRET=replace-with-your-webhook-secret
+PATCHPAW_GITHUB_PRIVATE_KEY_PATH=./secrets/github-app.private-key.pem
+PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com
+PATCHPAW_PORT=3000
+PATCHPAW_GITHUB_TEST_REPO=owner/repository
+PATCHPAW_ADMIN_TOKEN=replace-with-your-generated-admin-token
+PATCHPAW_HOME=
+```
 
-- `run-pr` and commands with repair permission may call a model, modify a workspace, commit/push changes, and post comments.
-- `bootstrap:control-plane` and Prompt/Skill/Provider/Command management modify the control-plane database.
-- `backup-runtime`, `restore-runtime`, and `migrate-runtime` read or write the runtime home; confirm targets and backup sources first.
-- Webhook handling persists snapshots, and issue comments may enter an execution queue; invalid signatures are rejected before payload parsing.
+An empty `PATCHPAW_ADMIN_TOKEN=` fails configuration validation; fill it in for this setup. Never publish environment files, PEMs or command output containing credentials, even though local secret paths are Git-ignored.
 
-See [docs/OPERATIONS.md](docs/OPERATIONS.md) for command behavior, output contracts, and permission boundaries.
+`PATCHPAW_GITHUB_TEST_REPO` remains required for passive PR snapshots. **It does not register a console repository**; initialize that explicitly in the next step. An empty `PATCHPAW_HOME` uses the service account's `~/.patchpaw`, which holds databases, repository caches, workspaces, execution records and server credentials. This is persistent data, not disposable cache. Keep the same directory when changing service managers/accounts.
 
-## Limitations and reporting
+For Zhipu/Z.ai, configure `ZAI_API_KEY`, `ZAI_BASE_URL` and `ZAI_MODEL`. For other providers, leave these empty and configure the provider and model bindings in the console later. See [.env.example](.env.example) for all variables.
 
-PatchPaw is not a hosted service and does not provide DNS, certificates, GitHub App provisioning, user accounts, or token recovery. The operator owns availability of GitHub, the model provider, the target repository toolchain, and the reverse proxy. Cross-platform support means PatchPaw's native Node runtime supports Linux/macOS/Windows; it does not mean every target repository's POSIX command works unchanged on Windows.
+## 4. Initialize a repository and start
 
-Read [SECURITY.md](SECURITY.md) before reporting a problem. Do not paste tokens, private keys, webhook payloads, runtime logs, or private repository content into public issues. See [CONTRIBUTING.md](CONTRIBUTING.md) for contributions and [LICENSE](LICENSE) for Apache-2.0 terms.
+```sh
+# Use repositories on which the App is installed; separate multiple names with spaces
+npm run bootstrap:control-plane -- owner/repository
+npm run check
+npm run build
+npm start
+```
+
+Bootstrap writes the local database and seeds prompts, skills, `/review`, `/CI`, `/conflict` and the conversation profile. Initial model bindings use Zhipu; successful bootstrap does not prove the credential is usable. **Default /CI and /conflict configurations have read/write permission.** Review or disable unwanted commands before use.
+
+The server binds only to `127.0.0.1:3000` (or the configured port). Check `curl http://127.0.0.1:3000/health` from another terminal. For persistent operation, use systemd or your existing process manager with the same service account, configuration and data directory. A regular foreground process ends with its terminal. Restart after environment changes.
+
+For development/release verification, also run `npm test`. Tests use local fixtures and do not require live GitHub or model credentials.
+
+## 5. Publish HTTPS
+
+Point your DNS record at the host and proxy **all paths** on that domain to `127.0.0.1:3000`. You are responsible for certificates, renewal and public connectivity.
+
+For an existing Nginx installation with a valid certificate, the core configuration is:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name patchpaw.example.com;
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+Replace the certificate paths; this example does not issue a certificate. Do not cache `/api/*`, add browser login challenges to `/github/webhook`, or rewrite its request body. Only the HTTPS entry point needs public exposure, not port 3000.
+
+## 6. Sign in and bind models
+
+1. Open the public origin and check the displayed origin and webhook URL. Resolve any origin mismatch.
+2. Sign in with the generated admin token, not your GitHub password or webhook secret.
+3. In Models, configure the provider endpoint, credential and model identifier; enable them. Choose a model with the tool-calling capabilities required by your commands.
+4. Select the usable model in the repository's Commands and conversation configuration, then save. **Adding a provider does not replace the initial Zhipu bindings.**
+5. Check enabled status, prompt/skill bindings and read/write permissions. Try a conversation or `/review` before repair flows.
+
+The browser receives an HttpOnly session cookie; the frontend build does not contain the admin token. To replace a lost token, generate a new one, update configuration and restart. Old sessions expire on restart; there is no recovery endpoint. Stored model credentials are not displayed again.
+
+## 7. Verify your first PR comment
+
+Check **Advanced → Recent Deliveries** in your GitHub App settings. Fix failed deliveries and use Redeliver as needed. A successful ping only verifies the entry point.
+
+As a repository owner/member/collaborator, post a **new ordinary comment on a PR's Conversation tab**, using your App slug:
+
+```text
+@my-team-patchpaw /review
+```
+
+Or start a conversation:
+
+```text
+@my-team-patchpaw Explain the main changes in this PR.
+```
+
+Do not assume the bot is named `@patchpaw`. Ordinary Issues, inline review comments and edits to existing comments do not trigger this flow. Opening or updating a PR alone does not start a model task.
+
+A webhook response of `202 verification_pending` means queued; verify an actual bot reply too. Repair operations may commit and push, subject to App permissions, command settings and branch protection. Do not disable branch protection to test setup.
+
+## Troubleshooting
+
+| Symptom | Check first |
+| --- | --- |
+| Startup failure | Node version, required fields, numeric App ID, PEM path/access, port conflict |
+| `frontend_not_built` | Run `npm run build` in the same checkout |
+| Origin mismatch | Browser origin, PUBLIC_ORIGIN and proxy Host; restart after changes |
+| Webhook 401 | Matching secrets, unchanged request body |
+| GitHub 403/404 | Installation scope, approved permissions, repository name, branch rules |
+| No reply | App slug, Issue comment subscription, new PR comment, author eligibility, repository initialization and enabled command |
+| Provider unavailable / invalid configuration | Credential, endpoint, model and command/conversation bindings |
+| Data seems lost after restart | Changed service account or PATCHPAW_HOME |
+
+## Maintenance and limits
+
+Stop the service and back up runtime data, `.env` and the App key before upgrades; backups contain secrets. After updating, run `npm ci`, `npm run check`, `npm test` and `npm run build`, then restart. See [operations](docs/OPERATIONS.md) and inspect script arguments before using backup, restore or migration tools.
+
+This is a single-admin self-hosted tool without tenant isolation or an OS sandbox. Review model output. Passing platform CI does not guarantee every target project's toolchain works. See [SECURITY.md](SECURITY.md) for reporting; never publish credentials, private code or unredacted logs. Licensed under [Apache-2.0](LICENSE).

@@ -1,99 +1,214 @@
 # PatchPaw
 
-PatchPaw 是一个自托管的 GitHub App 服务：它接收已签名的 Pull Request / issue comment 事件，按仓库配置运行代码审查、CI 修复、冲突分析和对话，并把结果发布回 GitHub。它还提供一个用于管理仓库、Prompt、Skill、模型和命令的 React 控制台。
+自托管的 GitHub App：在 Pull Request 评论中与 Agent 对话、请求代码审查、修复 CI、分析冲突，通过 Web 控制台管理仓库、模型、Prompt、Skill 和命令。
 
-[English documentation](README.en.md)
+[English](README.en.md) · [运维说明](docs/OPERATIONS.md) · [安全边界](docs/SECURITY-MODEL.md) · [贡献指南](CONTRIBUTING.md)
 
-## 先了解安全边界
+这是早期版本，适合愿意自行部署和维护的用户。当前发布支持 Linux、macOS，生产部署推荐 Linux。**暂不支持原生 Windows，目前没有官方 Docker 镜像；未来会考虑提供可在 Windows Docker 环境运行的 Linux 镜像，暂无时间表。**
 
-PatchPaw 会在目标仓库的工作区执行 Git、测试和模型生成的命令。应用本身不是容器或沙箱；不信任的仓库应在隔离的服务账号、容器或虚拟机中运行。生产部署必须由操作员提供 HTTPS、限制运行账号权限并保护运行目录、`.env`、GitHub App 私钥、Webhook secret 和模型凭据。
+## 准备清单
 
-命令权限是显式配置的一部分：`review`、普通对话和冲突分析默认只读；`repair`、`ci` 等修复路径可以获得读写能力，并可能提交、推送或在 GitHub 上发表评论。打开 Pull Request、收到被动 PR 事件或运行健康检查不会自动启动模型任务。
+- 一台可长期运行的 Linux 主机或 macOS，Node.js **22.22.0+ 的 22.x 版本**、npm、Git。
+- 一个域名或已有域名的子域名，可以配置 DNS 和 HTTPS 反向代理。
+- 一个你有权创建并安装到目标仓库的 GitHub App，下面会逐项引导。
+- 模型 API 凭据：支持 Zhipu/Z.ai、DeepSeek、OpenRouter、Kimi、Qwen。需自行确认模型、端点、费用和数据政策。
+- 目标项目运行检查所需的工具链，例如 Python、编译器或包管理器；PatchPaw 不会自动准备所有项目依赖。
 
-## 架构概览
+PatchPaw 不提供域名、服务器或模型额度。它会执行仓库代码和模型生成的命令，**不是安全沙箱**。使用专用非 root 账号；不信任的 PR 应放在隔离主机或虚拟机上执行，不要与其他重要凭据共用环境。
 
-- GitHub App 负责安装授权和 Webhook 签名；服务端校验事件后读取 GitHub 状态。
-- 控制面数据库保存仓库级 Prompt、Skill、Provider、Model、Command 和只读会话配置。
-- 每次执行先固定不可变配置快照，运行证据、日志和工作区状态写入运行目录。
-- `/api/setup` 在登录前只公布来源地址、Webhook URL、HTTPS 状态和管理员认证是否配置；它不返回任何凭据或文件路径。
-- 前端使用相对 API URL 和 HttpOnly 会话 cookie。管理员 token 只在登录请求中发送，服务端不会回显或提供找回接口。
+## 1. 确定公开地址
 
-## 环境要求
+假设使用 `https://patchpaw.example.com`：
 
-- Node.js 22.22.0 或更新的兼容版本
-- Git
-- 一个已安装到目标仓库的 GitHub App
-- 用于反向代理/TLS 的公开 HTTPS 域名（本地开发可使用明确的 localhost HTTP 来源）
-- 至少一个受支持的模型提供方凭据；模型请求可能产生费用，按提供方条款处理数据
+| 用途 | 地址 |
+| --- | --- |
+| 浏览器控制台 | `https://patchpaw.example.com/` |
+| GitHub App Webhook | `https://patchpaw.example.com/github/webhook` |
+| 公开部署信息 | `https://patchpaw.example.com/api/setup` |
+| 健康检查 | `https://patchpaw.example.com/health` |
 
-PatchPaw 本身支持 Linux、macOS 和 Windows 原生 Node.js。目标仓库自己的检查命令仍可能要求特定 shell 或工具链。
+**前端、API 和 Webhook 共用同一个域名和后端进程。** 不需要另一个前端域名或独立前端服务。`PATCHPAW_PUBLIC_ORIGIN` 填 `https://patchpaw.example.com`，不要加子路径或 `/github/webhook`。这个变量声明公开地址，不会自动配置 DNS、证书或监听端口。
 
-## 安装和首次启动
+## 2. 创建并安装 GitHub App
+
+在个人或组织的 **Settings → Developer settings → GitHub Apps → New GitHub App** 创建。个人账号可从 [GitHub App 设置](https://github.com/settings/apps) 进入。
+
+### 基本信息
+
+| GitHub 表单项 | 怎么填 |
+| --- | --- |
+| GitHub App name | 全 GitHub 唯一的名字，例如 `my-team-patchpaw` |
+| Homepage URL | 你的公开地址，例如 `https://patchpaw.example.com` |
+| Callback URL、Setup URL | 留空；控制台不使用 GitHub OAuth 登录 |
+| Request user authorization (OAuth) during installation | 不勾选 |
+| Enable Device Flow | 不勾选 |
+| Webhook → Active | 勾选 |
+| Webhook URL | `https://patchpaw.example.com/github/webhook` |
+| Webhook secret | 自己生成的随机 secret，稍后原样写入 `.env` |
+| SSL verification | 保持启用 |
+
+生成 Webhook secret，单独保存，不要与管理员 token 共用：
+
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+### Repository permissions
+
+以下权限覆盖审查、PR 评论和 CI 读取。需要推送修复时再开启对应写权限：
+
+| 权限 | 设置 | 用途 |
+| --- | --- | --- |
+| Metadata | Read-only（自动提供） | 仓库基础信息 |
+| Contents | Read-only；需要修复推送时改为 Read and write | 拉取代码、推送修复 |
+| Pull requests | Read and write | 读取 PR、发布审查及 PR 评论 |
+| Commit statuses | Read-only | 读取提交状态 |
+| Checks | Read-only | 读取检查结果 |
+| Actions | Read-only | 读取 workflow、job 和失败日志 |
+| Workflows | 默认 No access；需要修改 `.github/workflows/*` 时开启 Read and write | 推送 workflow 文件改动 |
+
+其他权限保持 No access，包括 Organization permissions、Account permissions、Administration。当前处理 PR 普通评论，Pull requests 写权限可用于该评论接口，**不需要另开 Issues 写权限**。App 的写权限与控制台命令的读写权限是两个层次：拥有推送权限不等于每个命令都会推送。
+
+### Subscribe to events
+
+勾选 **Pull request** 和 **Issue comment**。后者包括 PR 的 Conversation 页普通评论，不是行内审查评论；不要用 Pull request review comment 代替。当前不需要手动订阅 Push、Check run 或 Workflow run，CI 信息在执行时读取。
+
+**Where can this GitHub App be installed?** 自用选 Only on this account；要安装到其他账号或组织才选 Any account。创建后：
+
+1. 记录 **App ID**，不是 Client ID 或 Installation ID。
+2. 从 App 页面地址 `https://github.com/apps/<slug>` 确认 slug，例如 `my-team-patchpaw`。
+3. 在 **Private keys → Generate a private key** 下载 PEM，稍后上传服务器。
+4. 左侧 **Install App → Install**，选择账号/组织，再选 **Only select repositories**，只授权目标仓库。只创建 App 不安装，无法访问仓库。
+5. 以后增加权限，安装所属账号还需批准新权限。
+
+服务尚未启动时，首次 ping 失败是正常的，部署后再检查投递。参考：[GitHub 注册指南](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)、[权限指南](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)、[PR 评论接口权限](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment)。
+
+## 3. 安装并填写配置
+
+在运行服务的专用账号下执行：
 
 ```sh
 git clone https://github.com/fengyincheng/patchpawwww.git
 cd patchpawwww
 npm ci
 cp .env.example .env
-npm run generate:admin-token
-npm run check
-npm test
-npm run build
-npm run start
-```
-
-Windows PowerShell 可使用 `Copy-Item .env.example .env`，然后运行相同的 npm 命令。把 token 生成命令输出的单行内容放入服务端 `.env`，不要把命令输出写入仓库或日志。`npm run start` 默认只监听本机地址；生产环境通过反向代理发布。
-
-## 配置 GitHub App、域名和 Webhook
-
-1. 在 GitHub 创建一个仅供自己部署使用的 App，设置唯一的 App slug 和 App ID，并只安装到需要管理的仓库。
-2. 将 `PATCHPAW_PUBLIC_ORIGIN` 设置为公开的 scheme + host，不要带路径，例如 `https://patchpaw.example.com`。浏览器访问的来源、该值和 GitHub App 的 Webhook URL 必须使用同一个来源。
-3. 将 GitHub App Webhook URL 设置为 `https://patchpaw.example.com/github/webhook`，并设置一个新的随机 Webhook secret。启用应用需要的事件：`pull_request`、`issue_comment`；如需安装状态同步，再启用安装相关事件。
-4. 仓库权限按实际功能授予最小范围：Metadata 至少为 Read；Pull requests、Issues/issue comments、Contents、Checks/Actions 等权限只在对应审查/修复流程需要时开启。需要提交或推送的修复命令才授予 Contents write；只读审查不应获得写权限。
-5. 下载 App 私钥一次，放在运行目录之外或受限的 secrets 目录中，设置 `PATCHPAW_GITHUB_PRIVATE_KEY_PATH`。不要提交 PEM 文件。Webhook secret 和私钥必须分别轮换；任何泄露都应立即在 GitHub 撤销并重新生成。
-6. DNS 将域名指向反向代理。代理负责 TLS，转发 `/`、`/api/*` 和 `/github/webhook` 到本机 PatchPaw 监听端口，并保留正确的 `Host`/来源行为。确认代理不会缓存 `/api/setup` 或管理 API 响应。
-
-前端登录页和 Settings 会显示服务器看见的公开来源、派生 Webhook URL、HTTPS、token 配置状态，并比较浏览器 `window.location.origin`。出现 mismatch 时先修正 DNS、代理和 `PATCHPAW_PUBLIC_ORIGIN`，再尝试登录；修改环境变量后必须重启服务。
-
-## 管理员登录凭据
-
-```sh
+chmod 600 .env
+mkdir -p secrets
+chmod 700 secrets
 npm run generate:admin-token
 ```
 
-该命令通过系统密码学随机源生成一个 32 字节、64 个十六进制字符的 token，只打印一行，不创建文件、不写入运行目录，也没有 API 找回或回显接口。把它作为 `PATCHPAW_ADMIN_TOKEN` 放入仅服务端可读的 `.env`，重启后在 HTTPS 登录页输入。浏览器只会收到短期 HttpOnly session cookie；构建后的前端资源不包含 token。
-
-轮换时生成新 token、替换 `.env` 中旧值并重启。重启会清除内存中的会话，因此旧登录会失效。丢失 token 无法恢复，只能生成并配置新的 token。建议使用专用服务账号和权限严格的环境文件，不要把 token 放进 Vite 公开变量、浏览器 localStorage、shell history、CI 日志或 issue。
-
-## 环境变量速览
-
-`.env.example` 是完整的通用模板。必填项包括 GitHub App ID/slug、Webhook secret、私钥路径、公开来源、监听端口和目标仓库；`PATCHPAW_ADMIN_TOKEN` 对控制台登录是必需的，但模板保持为空。`ZAI_*` 变量用于首次控制面 Provider 的可选初始化；之后也可以在 Models 页面管理 Provider，并且界面只展示凭据是否配置，不回显密钥。
-
-`PATCHPAW_HOME` 为空时使用持久化运行目录：Linux/macOS 为 `~/.patchpaw`，Windows 为 `%USERPROFILE%\\.patchpaw`（通常是 `C:\\Users\\<user>\\.patchpaw`）。它不是临时缓存，包含数据库、仓库缓存、工作区、执行记录、快照、日志、备份、锁和服务端凭据引用。使用另一块磁盘或服务账号时显式设置 `PATCHPAW_HOME`，并用操作系统权限保护该目录；Windows 应配置限制到服务账号的 NTFS ACL。
-
-## 安全检查与有副作用的命令
-
-本地验证可以按以下顺序运行：
+将最后一条命令生成的 token 存入密码管理器，并填到 `.env` 的 `PATCHPAW_ADMIN_TOKEN`。把下载的 PEM 上传为 `secrets/github-app.private-key.pem`，执行：
 
 ```sh
-npm run check
-npm test
-npm run build
+chmod 600 secrets/github-app.private-key.pem
 ```
 
-这些命令不应创建 GitHub 分支、Pull Request、提交或模型请求（测试夹具除外）。`npm run verify:frontend -- <url>` 只比较已构建前端资源；不要把真实 token 作为参数传入任何命令。
+编辑 `.env`，替换所有占位值：
 
-以下操作可能改变外部状态，必须在明确审批和备份后执行：
+```dotenv
+PATCHPAW_GITHUB_APP_ID=123456
+PATCHPAW_GITHUB_APP_SLUG=my-team-patchpaw
+PATCHPAW_GITHUB_WEBHOOK_SECRET=replace-with-your-webhook-secret
+PATCHPAW_GITHUB_PRIVATE_KEY_PATH=./secrets/github-app.private-key.pem
+PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com
+PATCHPAW_PORT=3000
+PATCHPAW_GITHUB_TEST_REPO=owner/repository
+PATCHPAW_ADMIN_TOKEN=replace-with-your-generated-admin-token
+PATCHPAW_HOME=
+```
 
-- `run-pr` 及启用修复权限的命令可能调用模型、修改工作区、提交/推送修复并发表评论。
-- `bootstrap:control-plane`、Prompt/Skill/Provider/Command 管理会修改控制面数据库。
-- `backup-runtime`、`restore-runtime`、`migrate-runtime` 会读写运行目录；恢复前确认目标和备份来源。
-- Webhook 处理会持久化快照，issue comment 可能进入排队的执行流程；签名校验失败不会解析事件。
+管理员 token 必须填写；保留空的 `PATCHPAW_ADMIN_TOKEN=` 会导致配置校验失败。`.env` 文件和 secrets 目录虽然已被 Git 忽略，也不要把它们上传到 issue 或日志。`.env.example` 是公开模板，不要在其中填写真实凭据。
 
-审查和修复的完整行为、输出契约和权限边界见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
+`PATCHPAW_GITHUB_TEST_REPO` 当前仍为必填，用于被动 PR 事件快照；**它不会自动把仓库加入控制台**，下一步需要显式初始化。`PATCHPAW_HOME` 留空使用运行账号的 `~/.patchpaw`，包含数据库、仓库缓存、工作区、执行记录和服务端凭据，不是临时缓存。换账号或服务管理器时保持数据目录一致。
 
-## 限制和故障报告
+若使用 Zhipu/Z.ai，在 `.env` 填好 `ZAI_API_KEY`、`ZAI_BASE_URL`、`ZAI_MODEL`；使用其他提供方可先留空，随后在控制台配置并重新绑定模型。完整说明见 [.env.example](.env.example)。
 
-PatchPaw 不是托管服务，不提供 DNS、证书、GitHub App provisioning、用户账号或 token 恢复服务。模型、GitHub API、目标仓库工具链和反向代理的可用性由操作员负责。跨平台支持表示 PatchPaw 的 Node 运行时路径支持 Linux/macOS/Windows，不表示每个目标仓库的 POSIX 命令都能在 Windows 执行。
+## 4. 初始化仓库并启动
 
-请先阅读 [安全策略](SECURITY.md)，不要在公开 issue 中粘贴 token、私钥、Webhook payload、运行日志或私有仓库内容。贡献方式见 [CONTRIBUTING.md](CONTRIBUTING.md)，许可证为 [Apache-2.0](LICENSE)。
+```sh
+# 替换为 App 已安装的真实仓库，多个仓库用空格分隔
+npm run bootstrap:control-plane -- owner/repository
+npm run check
+npm run build
+npm start
+```
+
+初始化会写本地数据库，创建默认 Prompt、Skill、`/review`、`/CI`、`/conflict` 和普通对话配置。默认绑定是 Zhipu 模型；初始化成功不表示模型凭据已可用。**默认 /CI、/conflict 配置具有读写权限**，请在首次使用前检查或禁用不需要的命令。
+
+服务只监听 `127.0.0.1:3000`（端口由配置决定）。在另一个终端执行 `curl http://127.0.0.1:3000/health` 确认响应。长期运行请使用 systemd 或已有进程管理器，以同一账号、同一份配置和数据目录启动；普通前台进程会随终端关闭而退出。修改 `.env` 后重启。
+
+开发/发布验证还应运行 `npm test`。测试使用本地夹具，不需要真实 GitHub 或模型凭据。
+
+## 5. 配置 HTTPS 反向代理
+
+在 DNS 提供商处把子域名指向部署主机，用反向代理把此域名的**全部路径**转发到 `127.0.0.1:3000`。证书申请、续期和公网入口由你维护。
+
+已有 Nginx 和有效证书时，核心配置示例：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name patchpaw.example.com;
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+替换证书路径；此示例不会自动申请证书。不要缓存 `/api/*`，不要给 `/github/webhook` 加浏览器登录挑战或改写请求体。无需公网开放 3000 端口，只开放 HTTPS 入口即可。
+
+## 6. 登录并绑定模型
+
+1. 打开公开域名，确认登录页显示的公开地址和 Webhook URL 正确，没有 origin mismatch。
+2. 输入第 3 步生成的管理员 token；不是 GitHub 密码或 Webhook secret。
+3. 在 Models 页面配置 Provider 地址、凭据和模型标识，确认启用。选择具有所需工具调用能力的模型。
+4. 在目标仓库的 Commands 和普通对话配置中选择实际可用的模型并保存。**添加 Provider 不会自动替换默认的 Zhipu 绑定。**
+5. 检查命令启用状态、Prompt/Skill 绑定和读写权限；先尝试普通对话或 `/review`，再使用修复流程。
+
+浏览器通过 HttpOnly cookie 保持会话，前端构建不包含管理员 token。忘记 token 时重新生成、修改配置并重启，旧会话失效，没有找回接口。模型密钥只显示是否配置，不回显原值。
+
+## 7. 验证第一条 PR 评论
+
+在 GitHub App 的 **Advanced → Recent Deliveries** 检查投递，修正失败原因后可 Redeliver。`ping` 成功仅表示入口可达，不代表模型可用。
+
+用仓库 owner/member/collaborator 身份，在已安装仓库的 PR **Conversation** 页发表新评论，替换成自己的 App slug：
+
+```text
+@my-team-patchpaw /review
+```
+
+也可以普通对话：
+
+```text
+@my-team-patchpaw 请解释这个 PR 的主要改动
+```
+
+不要把固定的 `@patchpaw` 当作自己的 App 名称。普通 Issue、行内审查评论、编辑旧评论都不会按此流程触发；仅打开或更新 PR 不会自动启动模型任务。
+
+Webhook 返回 `202 verification_pending` 表示已入队，还需确认机器人实际回复。修复命令可能提交和推送，受 App 权限、命令配置、分支保护约束，不要为首次验证关闭分支保护。
+
+## 常见问题
+
+| 现象 | 优先检查 |
+| --- | --- |
+| 启动失败 | Node 版本、必填配置、App ID 数字、PEM 路径/权限、端口占用 |
+| `frontend_not_built` | 在同一 checkout 执行 `npm run build` |
+| 登录来源不匹配 | 浏览器域名、PUBLIC_ORIGIN、代理 Host 一致；改配置后重启 |
+| Webhook 401 | GitHub 与本地 secret 一致、代理未改请求体 |
+| GitHub 403/404 | App 安装范围、权限批准、仓库名称、分支规则 |
+| 评论无反应 | slug、Issue comment 订阅、PR 普通新评论、作者身份、初始化和命令启用状态 |
+| Provider unavailable / 配置不完整 | 密钥、端点、模型及命令/对话绑定 |
+| 重启后数据消失 | 账号或 PATCHPAW_HOME 改变，检查实际目录 |
+
+## 维护与限制
+
+升级前停止服务并备份运行目录、`.env` 和 App 私钥，备份含敏感信息。更新后执行 `npm ci`、`npm run check`、`npm test`、`npm run build` 再启动。备份、恢复和迁移说明见 [运维文档](docs/OPERATIONS.md)，先阅读脚本参数再操作。
+
+本项目是单管理员自托管工具，不提供租户隔离或 OS 沙箱。模型结果需要人工审阅；平台 CI 通过也不表示所有目标项目工具链可运行。安全报告见 [SECURITY.md](SECURITY.md)，不要公开上传凭据、私有代码或未脱敏日志。许可证：[Apache-2.0](LICENSE)。
