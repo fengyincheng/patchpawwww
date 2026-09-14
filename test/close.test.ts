@@ -191,7 +191,8 @@ test('retired commands never replay and the next mention starts a fresh generati
   // Closing the second generation repeats the visible sequence and stays harmless.
   const posted = f.calls.filter(c => c.body && c.path.endsWith('/issues/7/comments')).length;
   await f.mention('@patchpawwww /close', 103);
-  assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'closed');
+  const closedResult = await runPullRequest(f.config, 'owner/lab', 7);
+  assert.equal(closedResult.status, 'closed', JSON.stringify(closedResult));
   const closed = await readState(path);
   assert.equal(closed?.phase, 'closed');
   assert.equal(closed?.closed_through_comment_id, 103);
