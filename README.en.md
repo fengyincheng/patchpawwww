@@ -6,6 +6,8 @@ A self-hosted GitHub App for PR conversations, code reviews, CI repair and confl
 
 This is an early release for operators comfortable maintaining their own deployment. Linux and macOS are supported; Linux is recommended for production. **Native Windows is not currently supported. No official Docker image is available. A Linux container image usable through Docker on Windows may be considered in the future; there is no release date.**
 
+Quick navigation: [Setup](#prerequisites) · [Commands](#everyday-commands) · [Custom commands](#create-a-custom-command-explain) · [Architecture](#architecture) · [Runtime data](#runtime-data-layout)
+
 ## Prerequisites
 
 - A persistent Linux host or macOS, Node.js **22.x, version 22.22.0 or newer**, npm and Git.
@@ -191,6 +193,131 @@ Or start a conversation:
 Do not assume the bot is named `@patchpaw`. Ordinary Issues, inline review comments and edits to existing comments do not trigger this flow. Opening or updating a PR alone does not start a model task.
 
 A webhook response of `202 verification_pending` means queued; verify an actual bot reply too. Repair operations may commit and push, subject to App permissions, command settings and branch protection. Do not disable branch protection to test setup.
+
+## Everyday commands
+
+Replace `@my-team-patchpaw` with your App slug. Post a new ordinary comment on the PR's Conversation tab. Use one command per comment, immediately after the bot mention at the start of a line, outside quotes and code fences.
+
+| Comment | Behavior |
+| --- | --- |
+| `@my-team-patchpaw Explain these changes` | Conversation using the repository's conversation profile |
+| `@my-team-patchpaw /review` | Review the current PR and publish findings, without automatically repairing code |
+| `@my-team-patchpaw /CI` | Read current-commit CI results/logs and enter the repair flow; may commit and push |
+| `@my-team-patchpaw /conflict` | Analyze conflicts with the target branch and publish a proposal for discussion; repair requires explicit approval |
+| `@my-team-patchpaw /approval` | Approve the current valid conflict proposal after reading it; `/approve` is an alias |
+| `@my-team-patchpaw /stop` | Request cancellation, retaining execution evidence and applicable paused state |
+| `@my-team-patchpaw /close` | Clear this PR's local session and associated work data, without closing the GitHub PR |
+
+Bootstrap creates repository commands for review, CI and conflict. Stop, close and approval are reserved system controls. Matching is case-insensitive. Unknown, disabled or ambiguous multiple commands fall back to conversation and do not authorize repair. `/repair` is not seeded by default; create a command with the repair execution type if needed.
+
+### Stop execution versus clear a session
+
+Send `@my-team-patchpaw /stop` to stop interruptible work through cancellation signals and task checkpoints. It is not an undo operation or a guarantee of instant termination. Published comments and completed pushes remain; an external publication already in progress may finish. Check the final bot report and remote GitHub state. Supported task types may retain a paused workspace; reuse depends on version and other checks, and not every task can resume identically.
+
+When finished with the PR, send `@my-team-patchpaw /close`. This removes local conversation memory, associated run records, workspaces, proposals, snapshots and comment inbox files. It preserves the shared Git repository, other PRs, repository configuration and GitHub comments/commits. It does not close the remote PR. Necessary closure and delivery records remain to prevent old comments from replaying. A later mention starts a new local session.
+
+Close refuses while a task is active: send stop, wait for confirmation, then send close separately. Cleanup failures are recorded; another close retries cleanup without recreating deleted resources. An acknowledgement alone does not mean cleanup completed.
+
+## Create a custom command: /explain
+
+Commands are repository-scoped and may use different models, prompts and skills without server code changes.
+
+1. Select the repository in the console. In **Prompts**, create and enable a repository prompt such as `explain-changes`, using the example below.
+2. Open **Commands → New command**. Enter `explain` without the slash and a display name.
+3. Select execution type **custom**, permission **read_only**, an available model, and enable the command.
+4. Bind the prompt as an enabled **main** binding. Optionally add common requirements, auxiliary instructions and skills, then arrange their order.
+5. Save and select **Preview effective** to inspect the model, permissions and composed prompt/skill content. Preview reads saved configuration and does not invoke the model; save edits first.
+6. Post `@my-team-patchpaw /explain` on a PR.
+
+Example prompt:
+
+```text
+Read the current PR changes and explain them to a new teammate:
+1. What problem does this solve?
+2. How do the key files work together?
+3. Which callers may be affected, and what validation is missing?
+Cite actual file paths. State uncertainty where evidence is missing.
+Do not modify files or commit code.
+```
+
+Names must start with a lowercase letter and contain only lowercase letters, digits and hyphens, up to 32 characters. Reserved names include stop, close, approval, approve and confict. Enabled commands require at least one enabled main prompt. Public assets must first be available as repository-bindable assets; creating a prompt or skill alone does not attach it to a command.
+
+**Custom commands use only the selected prompt/skill stack, without inheriting Review, CI or Conflict instructions or publication workflows.** Choosing read_write does not add the built-in CI verification/commit flow; choose the appropriate execution type when that flow is needed. Set permissions in configuration, not just in prompt wording. Conversations have a separate profile.
+
+Each execution fixes its effective configuration snapshot. Editing the console does not replace instructions mid-run, and resuming an earlier execution may retain its original snapshot.
+
+## Architecture
+
+```text
+GitHub PR comments / webhooks
+          │ signature validation and durable inbox
+          ▼
+Communication scheduler ──► PR worker ──► Harness / models / tools
+          ▲                     │                    │
+          │                     │                    └─ Worktree, checks, evidence
+          │                     └─ Configuration snapshot, PR state and memory
+          └──── Durable outbox ──► GitHub comments / reviews
+
+Web console ──► Admin API ──► Repository, model, prompt, skill and command configuration
+```
+
+Source code is separate from mutable runtime data:
+
+```text
+patchpawwww/
+├── src/
+│   ├── index.ts            # Service entry point
+│   ├── server/             # Webhooks, admin API, sessions, frontend assets
+│   ├── github/             # App client, PR/CI reads and review publishing
+│   ├── control-plane/      # Configuration entities and snapshots
+│   ├── runner/             # PR lifecycle, scheduling, pause, close, delivery
+│   ├── harness/            # Models, tools, budgets, memory and traces
+│   ├── tasks/              # Conversation, custom, review, repair, CI, conflict
+│   ├── workspace/          # Shared Git object store and worktrees
+│   ├── platform/           # Locks, processes and shell
+│   └── migration/          # Migration, backup and restore
+├── web/                    # React console
+├── operation/              # Built-in prompt sources
+├── skills/                 # Bundled skill assets
+├── scripts/                # Bootstrap and operations
+└── test/                   # Tests and local fixtures
+```
+
+### One repository, multiple PRs
+
+Each GitHub repository has one persistent bare Git object store. Executions use separate linked worktrees sharing its objects instead of making a complete clone per PR. State, memory and execution artifacts are separated by PR/run. The repository lock covers metadata operations such as fetch and worktree creation/removal, not model execution, so different PRs can work concurrently within host resources and API quotas.
+
+### Refreshing the code baseline
+
+Before choosing a new or retained workspace, execution reads the GitHub PR state and fetches the **exact PR head and current target-branch tip**. If the target is main, main is refreshed; other target branches are handled by their actual names.
+
+Runs record the SHAs they use. New worktrees start from the PR head; refreshing the shared store does not automatically merge main into the PR or mutate a paused worktree. Remote code can change during execution; publication and recovery paths perform relevant freshness checks and may require reprocessing when the baseline changes. This is not continuous live synchronization. It refreshes the target repository's Git data, not the PatchPaw application itself.
+
+## Runtime data layout
+
+The default is `~/.patchpaw/`, overridable with `PATCHPAW_HOME`. Directories are created as needed; SQLite WAL files and recovery/lock sidecars may also exist.
+
+```text
+~/.patchpaw/
+├── data/
+│   ├── control-plane.db    # Repositories, prompts, skills, providers, models, commands
+│   ├── communication.db    # Durable inbox/outbox, delivery and recovery state
+│   ├── memory/<hash>.db    # PR-specific conversation memory
+│   ├── state/owner__repo/  # PR state, pause/close records and proposals
+│   └── outbox/             # File-based outbound support data
+├── secrets/providers/      # Server-side model credentials
+├── repos/<encoded-repo>.git/ # One shared bare object store per repository
+├── workspaces/<run-id>/     # Linked Git worktrees
+├── runs/<run-id>/           # Traces, artifacts, validation and configuration snapshots
+├── snapshots/              # GitHub event snapshots
+├── logs/                   # Service logs
+├── locks/                  # Runtime/repository coordination
+├── backups/                # Backups
+├── cache/                  # Cache directory
+└── tmp/                    # Temporary data
+```
+
+Shared objects avoid repeated full clones. Lifecycle handling disposes of terminal workspaces where applicable, paused work may retain them, and close reclaims the main PR-local session artifacts. **There is no global disk quota or comprehensive automatic retention policy.** Git objects, communication records, logs, backups and unclosed sessions still require monitoring and maintenance. Automatic Git GC is disabled during shared-store fetches. Do not manually delete active databases/worktrees; stop the service and back up before maintenance.
 
 ## Troubleshooting
 

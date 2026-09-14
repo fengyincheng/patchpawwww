@@ -6,6 +6,8 @@
 
 这是早期版本，适合愿意自行部署和维护的用户。当前发布支持 Linux、macOS，生产部署推荐 Linux。**暂不支持原生 Windows，目前没有官方 Docker 镜像；未来会考虑提供可在 Windows Docker 环境运行的 Linux 镜像，暂无时间表。**
 
+快速导航：[安装准备](#准备清单) · [常见命令](#日常使用与常见命令) · [自定义命令](#自定义命令以-explain-为例) · [架构](#架构) · [数据目录](#数据目录结构)
+
 ## 准备清单
 
 - 一台可长期运行的 Linux 主机或 macOS，Node.js **22.22.0+ 的 22.x 版本**、npm、Git。
@@ -193,6 +195,143 @@ server {
 不要把固定的 `@patchpaw` 当作自己的 App 名称。普通 Issue、行内审查评论、编辑旧评论都不会按此流程触发；仅打开或更新 PR 不会自动启动模型任务。
 
 Webhook 返回 `202 verification_pending` 表示已入队，还需确认机器人实际回复。修复命令可能提交和推送，受 App 权限、命令配置、分支保护约束，不要为首次验证关闭分支保护。
+
+## 日常使用与常见命令
+
+以下示例中的 `@my-team-patchpaw` 都要替换为你的 App slug。每次在 PR 的 Conversation 页新发一条评论，一条评论只执行一个命令，命令紧跟在行首的机器人 mention 后面；不要放在引用或代码块中。
+
+| 评论示例 | 行为 |
+| --- | --- |
+| `@my-team-patchpaw 解释一下这次改动` | 普通对话，使用该仓库的对话配置 |
+| `@my-team-patchpaw /review` | 审查当前 PR，发布审查结果；不自动修复代码 |
+| `@my-team-patchpaw /CI` | 读取当前提交的 CI 结果和失败日志，进入 CI 修复流程；可能提交、推送 |
+| `@my-team-patchpaw /conflict` | 分析 PR 与目标分支的冲突，形成供讨论的方案；修复需要后续明确批准 |
+| `@my-team-patchpaw /approval` | 批准当前有效的冲突方案；先阅读机器人发布的方案再执行，`/approve` 是别名 |
+| `@my-team-patchpaw /stop` | 请求停止当前任务，保留执行记录及适用的暂停现场 |
+| `@my-team-patchpaw /close` | 清理本 PR 的本地会话和相关工作数据，不关闭 GitHub PR |
+
+`/review`、`/CI`、`/conflict` 是初始化创建的仓库命令，可以在控制台管理；`/stop`、`/close`、`/approval` 是系统控制命令。命令匹配不区分大小写。未知、禁用或同一评论中歧义的多个命令会按普通对话处理，不会因此授权修复。`/repair` 不是默认创建的命令；需要时可在控制台创建并选择 repair 执行类型。
+
+### 停止与清理是两件事
+
+中途想停时发送：
+
+```text
+@my-team-patchpaw /stop
+```
+
+系统通过取消信号和任务检查点停止可中断的工作，并报告已观察到的进展。它不是回滚按钮，也不保证瞬时停止；已经发出的评论、已完成的推送不会撤销，正在进行的外部发布可能先完成。以机器人最终报告和 GitHub 远端状态为准。受支持的任务可保留暂停工作区，后续是否复用还需通过远端版本等检查，不能承诺任意任务都能原样续跑。
+
+这条 PR 的工作结束后，发送：
+
+```text
+@my-team-patchpaw /close
+```
+
+它清理本地会话记忆、关联 run 记录、工作区、方案、快照和评论收件文件；共享 Git 仓库和其他 PR 不受影响，也不会删除 GitHub 上的评论、提交或关闭 PR。仓库在控制台的模型/命令配置仍保留。系统会留下必要的关闭状态和投递记录，以防旧评论重放。以后再次 mention，会建立新的本地会话。
+
+若任务仍在运行，`/close` 会拒绝执行：先 `/stop`，等待停止确认，再单独发送 `/close`。清理失败会记录进度，再次 `/close` 会重试清理；已删除的资源不会重建。不要根据“已收到请求”就判断清理完成。
+
+## 自定义命令：以 /explain 为例
+
+可以给每个仓库配置自己的命令，例如解释改动、检查文档或按团队规则整理发布说明。不同命令可以选择不同模型和 Prompt，不需要改服务端代码。
+
+1. 在控制台选择目标仓库，进入 **Prompts**，创建并启用一个仓库 Prompt，例如 `explain-changes`，内容如下。
+2. 进入 **Commands → 新建命令**，命令名填 `explain`（不带斜杠），显示名可填“解释改动”。
+3. 执行类型选择 **custom / 自定义命令**，权限选择 **read_only / 只读**，选择可用模型并启用命令。
+4. 在 Prompt 列表中绑定刚才的 Prompt，绑定类型选 **main** 并启用。按需添加 common（公共要求）、auxiliary（辅助要求）或 Skill，并调整顺序。
+5. 保存后点 **预览生效配置**，确认模型、权限和实际 Prompt/Skill 内容。预览读取已保存配置，不会执行模型任务；有未保存修改时先保存。
+6. 在 PR 中发表 `@my-team-patchpaw /explain`。
+
+示例 Prompt：
+
+```text
+请阅读当前 PR 的改动，用中文向新同事解释：
+1. 改动解决了什么问题；
+2. 关键文件之间如何配合；
+3. 可能影响哪些调用方，还缺哪些验证。
+引用实际文件路径；没有证据时明确说不确定。
+不要修改文件或提交代码。
+```
+
+命令名为 1–32 个字符，小写字母开头，仅含小写字母、数字、连字符；不要占用 `stop`、`close`、`approval`、`approve`、`confict` 等保留名称。启用的命令至少要有一个启用的 main Prompt。公共资产需要先成为该仓库可绑定的资产；仅创建 Prompt/Skill 不会自动使其参与命令。
+
+**custom 只使用你选定的 Prompt/Skill，不会继承 Review、CI 或 Conflict 的内置指令与发布流程。** 切成 read_write 也不等于自动获得 CI 修复的验证和提交流程；需要内置流程时选择相应执行类型。权限要在配置中设置，不能只靠 Prompt 里写“只读”。普通对话有独立配置，修改某个命令不会同时更改普通对话。
+
+运行时会固定本次生效配置快照；编辑控制台不会把已启动任务的指令中途替换。恢复旧执行时可能沿用其原始快照。
+
+## 架构
+
+```text
+GitHub PR 评论 / Webhook
+         │ 签名校验、持久化收件
+         ▼
+通信调度器 ──► PR worker ──► Harness / 模型 / 工具
+         ▲          │                │
+         │          │                └─ Git worktree、检查、证据
+         │          └─ 固定配置快照、PR 状态与记忆
+         └──── 持久化发件队列 ──► GitHub 评论 / 审查结果
+
+Web 控制台 ──► 管理 API ──► 仓库、模型、Prompt、Skill、命令配置
+```
+
+源码按职责组织，部署源码与运行数据分开：
+
+```text
+patchpawwww/
+├── src/
+│   ├── index.ts            # 服务启动
+│   ├── server/             # Webhook、管理 API、会话认证、前端静态资源
+│   ├── github/             # GitHub App 客户端、PR/CI 读取与审查发布
+│   ├── control-plane/      # 仓库、模型、Prompt、Skill、命令与配置快照
+│   ├── runner/             # PR 生命周期、调度、暂停、关闭、可靠投递
+│   ├── harness/            # 模型执行、工具、预算、记忆和 trace
+│   ├── tasks/              # conversation、custom、review、repair、CI、conflict
+│   ├── workspace/          # 共享 Git 对象库、worktree、Git 操作
+│   ├── platform/           # 文件锁、进程和 shell
+│   └── migration/          # 数据迁移、备份与恢复
+├── web/                    # React 控制台
+├── operation/              # 内置 Prompt 源文件
+├── skills/                 # 内置 Skill 资产
+├── scripts/                # 初始化与运维入口
+└── test/                   # 测试与本地夹具
+```
+
+### 一份仓库，多个 PR
+
+每个 GitHub 仓库只有一份持久 bare Git 对象库；各 PR 的执行使用独立 Git worktree，共享对象，不为每个 PR 重新完整克隆。PR 状态、会话记忆和任务现场按 PR/执行区分。共享仓库锁只覆盖 fetch、worktree 创建/移除等元数据操作，不贯穿模型执行，因此不同 PR 可以并行工作；实际并发仍受主机资源和 API 配额限制。
+
+### 每次执行刷新代码基线
+
+每次进入工作区阶段，系统先读取 GitHub PR 状态，再 fetch **当前 PR head 提交和目标分支的最新 tip**，之后才决定新建还是复用暂停工作区。目标分支是 `main` 就刷新 `main`，是其他分支就刷新该分支，不靠旧克隆中的默认分支判断代码。
+
+执行记录保留本次使用的提交 SHA；新的工作区基于确定的 PR head，不会擅自把最新 main 合并进 PR。运行途中远端仍可能改变，发布和恢复流程有相应的新鲜度检查，发现相关基线变化时需要重新处理，而不是承诺代码永远与远端实时同步。这里更新的是**目标仓库的 Git 数据**，不是自动升级 PatchPaw 服务本身。
+
+## 数据目录结构
+
+默认 `~/.patchpaw/`，可用 `PATCHPAW_HOME` 指定。部分目录按需创建，下面是逻辑布局，实际会有 SQLite WAL、锁和恢复辅助文件：
+
+```text
+~/.patchpaw/
+├── data/
+│   ├── control-plane.db    # 仓库、Prompt、Skill、Provider、Model、Command
+│   ├── communication.db    # 持久化收发件、投递和恢复状态
+│   ├── memory/<hash>.db    # 按 PR 区分的会话记忆
+│   ├── state/owner__repo/  # PR 状态、暂停/关闭记录和相关方案
+│   └── outbox/             # 文件型发件辅助数据
+├── secrets/providers/      # 服务端模型凭据
+├── repos/<encoded-repo>.git/ # 每仓库一份共享 bare 对象库
+├── workspaces/<run-id>/     # 执行工作区（Git linked worktree）
+├── runs/<run-id>/           # trace、产物、验证证据和配置快照
+├── snapshots/              # GitHub 事件快照
+├── logs/                   # 服务运行日志
+├── locks/                  # 运行/仓库等协调锁
+├── backups/                # 备份
+├── cache/                  # 缓存目录
+└── tmp/                    # 临时数据
+```
+
+共享对象库避免“每个 PR 完整克隆一遍”的重复占用；正常结束会按生命周期处理工作区，暂停现场可保留，`/close` 可回收本 PR 的主要会话数据。**当前没有全局磁盘配额或完整自动保留期策略，不能保证数据永不增长**：共享 Git 对象、通信记录、日志、备份及未关闭会话仍需监控和维护。共享仓库的 fetch 会禁用自动 Git GC。不要在任务运行时手动删除数据库或 worktree；维护前先停服务并备份。
 
 ## 常见问题
 
