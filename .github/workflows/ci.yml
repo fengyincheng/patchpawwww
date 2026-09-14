@@ -11,6 +11,7 @@ jobs:
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -32,8 +33,13 @@ jobs:
       - name: Type-check
         run: npm run check
 
-      - name: Test
+      - name: Test (Unix)
+        if: runner.os != 'Windows'
         run: npm test
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: node --import tsx scripts/run-test-files.ts
 
       - name: Build frontend
         run: npm run build
