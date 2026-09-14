@@ -13,20 +13,61 @@ import type { ProviderType } from '../src/control-plane/types.ts';
 
 type CapturedRequest = { body: Record<string, any>; headers: Record<string, string | string[] | undefined> };
 
+const FIXTURE_WAIT_MS = 5_000;
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(resolvePromise => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
+async function bounded<T>(promise: Promise<T>, description: string, timeoutMs = FIXTURE_WAIT_MS) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${description} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function settlementWithin(promise: Promise<unknown>, timeoutMs = FIXTURE_WAIT_MS): Promise<'fulfilled' | 'rejected' | 'timed_out'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timed_out'>(resolve => {
+    timer = setTimeout(() => resolve('timed_out'), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise.then(() => 'fulfilled' as const, () => 'rejected' as const), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function listen(handler: (request: CapturedRequest, response: import('node:http').ServerResponse) => void | Promise<void>) {
   const requests: CapturedRequest[] = [];
+  const requestReceived = deferred<CapturedRequest>();
   const server = createServer(async (request, response) => {
     let raw = '';
     for await (const chunk of request) raw += chunk;
     const captured = { body: JSON.parse(raw) as Record<string, any>, headers: request.headers };
     requests.push(captured);
+    requestReceived.resolve(captured);
     await handler(captured, response);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as { port: number };
-  return { requests, server, baseUrl: `http://127.0.0.1:${address.port}/v1`, close: () => new Promise<void>(resolve => {
-    server.closeAllConnections(); server.close(() => resolve());
-  }) };
+  return {
+    requests,
+    requestReceived: requestReceived.promise,
+    server,
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    close: () => bounded(new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    }), 'fixture close'),
+  };
 }
 
 function callOptions(abortSignal?: AbortSignal) {
@@ -243,20 +284,51 @@ test('transport retries one identical exchange, rejects truncated SSE, and prese
   });
 
   await t.test('caller cancellation aborts the request instead of retrying', async () => {
+    const responseRelease = deferred<void>();
     const cancelled = await listen(async (_request, response) => {
-      await new Promise(resolve => setTimeout(resolve, 200)); response.writeHead(200); response.end(responseBody('cancelled'));
+      await responseRelease.promise;
+      if (response.destroyed) return;
+      response.writeHead(200); response.end(responseBody('cancelled'));
     });
     const cancelId = 'cancel-provider'; await new SecretStore(root).writeProviderSecret(cancelId, 'cancel-secret');
     const cancelledHandle = createModel(new Trace(join(root, 'cancel-trace')), 'cancel', { provider: { id: cancelId, type: 'zhipu', baseUrl: cancelled.baseUrl,
       credentialRef: `slot:provider/${cancelId}`, requestOptions: {} }, model: { id: 'cancel-model', identifier: 'cancel-model' }, runtimeHome: root });
     const controller = new AbortController();
+    const pending = Promise.resolve().then(() => cancelledHandle.model.doGenerate(callOptions(controller.signal)));
+    void pending.catch(() => undefined);
     try {
-      const pending = cancelledHandle.model.doGenerate(callOptions(controller.signal));
-      setTimeout(() => controller.abort(new Error('fixture cancelled')), 10);
-      await assert.rejects(Promise.resolve(pending));
+      await bounded(cancelled.requestReceived, 'provider request receipt');
+      controller.abort(new Error('fixture cancelled'));
+      assert.equal(await settlementWithin(pending), 'rejected', 'cancelled request must reject');
       assert.equal(cancelled.requests.length, 1);
       assert.equal(cancelledHandle.isUnavailable(), false);
-    } finally { await cancelled.close(); }
+    } finally {
+      controller.abort(new Error('fixture cancelled during cleanup'));
+      responseRelease.resolve();
+      await settlementWithin(pending);
+      await cancelled.close();
+    }
+  });
+
+  await t.test('caller cancellation before send does not issue a provider request', async () => {
+    const beforeSend = await listen(async (_request, response) => {
+      response.writeHead(200); response.end(responseBody('cancelled-before-send'));
+    });
+    const cancelId = 'cancel-before-send-provider'; await new SecretStore(root).writeProviderSecret(cancelId, 'cancel-before-send-secret');
+    const cancelledHandle = createModel(new Trace(join(root, 'cancel-before-send-trace')), 'cancel-before-send', { provider: { id: cancelId, type: 'zhipu', baseUrl: beforeSend.baseUrl,
+      credentialRef: `slot:provider/${cancelId}`, requestOptions: {} }, model: { id: 'cancel-before-send-model', identifier: 'cancel-before-send-model' }, runtimeHome: root });
+    const controller = new AbortController();
+    controller.abort(new Error('cancel before provider send'));
+    const pending = Promise.resolve().then(() => cancelledHandle.model.doGenerate(callOptions(controller.signal)));
+    void pending.catch(() => undefined);
+    try {
+      assert.equal(await settlementWithin(pending), 'rejected', 'pre-send cancellation must reject');
+      assert.equal(beforeSend.requests.length, 0);
+      assert.equal(cancelledHandle.isUnavailable(), false);
+    } finally {
+      await settlementWithin(pending);
+      await beforeSend.close();
+    }
   });
 
   await t.test('2xx provider error envelopes become retryable upstream failures', async () => {
