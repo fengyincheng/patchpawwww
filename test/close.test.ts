@@ -170,7 +170,9 @@ test('retired commands never replay and the next mention starts a fresh generati
   assert.equal(first.status, 'conversation_completed');
   assert.ok((await stat(memory)).isFile());
   await f.mention('@patchpawwww /close', 101);
-  assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'closed');
+  const closeResult = await runPullRequest(f.config, 'owner/lab', 7);
+  if (closeResult.status !== 'closed') console.error('CLOSE_FAILURE_DEBUG', JSON.stringify({ closeResult, state: await readFile(path, 'utf8').catch(() => null), journal: await readFile(`${path}.close.json`, 'utf8').catch(() => null) }));
+  assert.equal(closeResult.status, 'closed');
   await assert.rejects(stat(memory), { code: 'ENOENT' });
   await assert.rejects(stat(join(f.root, 'runs', first.run_id!)), { code: 'ENOENT' });
   // Webhook redelivery of retired comments cannot resurrect them after the inbox was cleaned.
