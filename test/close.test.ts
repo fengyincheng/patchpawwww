@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { git } from '../src/workspace/git.ts';
@@ -69,6 +69,8 @@ test('/close retires one PR generation and preserves the shared repo, other PRs 
   const f = await fixture(t, false);
   const target = await seedPR(f, 7, { paused: true });
   const other = await seedPR(f, 8, { paused: true });
+  const targetWorktreePath = await realpath(target.wsPath);
+  const otherWorktreePath = await realpath(other.wsPath);
   await mkdir(`${target.path}.conflict-proposals`, { recursive: true });
   await writeFile(join(`${target.path}.conflict-proposals`, 'conflict-proposal-v1.json'), '{"evidence":"retained"}\n');
   await mkdir(join(f.root, 'runs', 'no-manifest-run'), { recursive: true });
@@ -105,10 +107,10 @@ test('/close retires one PR generation and preserves the shared repo, other PRs 
   assert.deepEqual((await readdir(join(f.root, 'repos'))).filter(name => name.endsWith('.git')),
     [`${encodeURIComponent('owner/lab')}.git`]);
   const registered = (await git(repoCachePath(f.root, 'owner/lab'), ['worktree', 'list', '--porcelain'])).stdout;
-  console.error('WORKTREE_PATH_DEBUG', JSON.stringify({ registered, target: target.wsPath, other: other.wsPath }));
+  console.error('WORKTREE_PATH_DEBUG', JSON.stringify({ registered, target: targetWorktreePath, other: otherWorktreePath }));
   const normalizedRegistered = registered.replaceAll('\\', '/').toLowerCase();
-  assert.ok(!normalizedRegistered.includes(target.wsPath.replaceAll('\\', '/').toLowerCase()));
-  assert.ok(normalizedRegistered.includes(other.wsPath.replaceAll('\\', '/').toLowerCase()));
+  assert.ok(!normalizedRegistered.includes(targetWorktreePath.replaceAll('\\', '/').toLowerCase()));
+  assert.ok(normalizedRegistered.includes(otherWorktreePath.replaceAll('\\', '/').toLowerCase()));
   assert.deepEqual((await readdir(join(f.root, 'workspaces'))).sort(), [other.runId]);
   const trace = new Trace(join(f.root, 'seed-trace'));
   await createWorktree(f.root, 'owner/lab', runWorkspacePath(f.root, 'post-close'), target.head, trace);
@@ -340,6 +342,7 @@ test('a corrupt paused worktree must really disappear before close claims comple
   if (process.platform === 'win32') {
     await chmod(join(seeded.wsPath, '.git'), 0o600);
     await execFileAsync('attrib', ['-R', join(seeded.wsPath, '.git')], { windowsHide: true });
+    await rm(join(seeded.wsPath, '.git'), { force: true });
   }
   await writeFile(join(seeded.wsPath, '.git'), 'corrupt gitdir pointer');
   await f.mention('@patchpawwww /close', 100);
