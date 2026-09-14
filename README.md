@@ -31,8 +31,8 @@ PatchPaw 本身支持 Linux、macOS 和 Windows 原生 Node.js。目标仓库自
 ## 安装和首次启动
 
 ```sh
-git clone <your-patchpaw-source>
-cd patchpaw
+git clone https://github.com/fengyincheng/patchpawwww.git
+cd patchpawwww
 npm ci
 cp .env.example .env
 npm run generate:admin-token

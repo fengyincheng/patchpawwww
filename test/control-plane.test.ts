@@ -33,6 +33,7 @@ import {
   listSkills,
   openControlPlaneDb,
   PROVIDER_TYPES,
+  SecretStore,
   setProviderCredential,
   updateCommand,
   updatePrompt,
@@ -101,7 +102,8 @@ test('provider credentials use an isolated 0600 slot and never appear in returne
     const slot = join(path, `${provider.id}.key`);
     assert.equal(updated.credentialRef, `slot:provider/${provider.id}`);
     assert.equal(await readFile(slot, 'utf8'), 'not-a-real-secret');
-    assert.equal((await stat(slot)).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal((await stat(slot)).mode & 0o777, 0o600);
+    else assert.equal(await new SecretStore(root).isConfigured(updated.credentialRef), true);
     assert.equal(JSON.stringify(updated).includes('not-a-real-secret'), false);
     assert.equal(JSON.stringify(updated).includes('Authorization'), false);
   } finally { closeControlPlaneDb(db); }

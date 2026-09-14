@@ -10,5 +10,6 @@ spike/conflict/selection.git/
 docs/资源/
 docs/_handoff/
 .secrets/
+/secrets/
 var/
 /web/dist/

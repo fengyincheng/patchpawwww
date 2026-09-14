@@ -1,12 +1,103 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { patchpawPaths } from '../config/paths.ts';
 import { ControlPlaneError, invalid } from './errors.ts';
 
 const ENV_REF = /^env:[A-Z_][A-Z0-9_]*$/;
 const SLOT_REF = /^slot:provider\/([a-zA-Z0-9-]+)$/;
 const PROVIDER_ID = /^[a-zA-Z0-9-]+$/;
+const WINDOWS_SID = /\bS-\d-\d+(?:-\d+)+\b/i;
+const execFileAsync = promisify(execFile);
+const windowsAclScript = fileURLToPath(new URL('../../scripts/windows/protect-acl.ps1', import.meta.url));
+
+interface WindowsAccount {
+  sid: string;
+}
+
+interface WindowsAclEntry {
+  sid: string;
+  rights: string;
+  type: string;
+  inherited: boolean;
+  inheritance: string;
+  propagation: string;
+}
+
+interface WindowsAcl {
+  entries: WindowsAclEntry[];
+}
+
+async function runWindowsCommand(command: string, args: string[]) {
+  const result = await execFileAsync(command, args, { encoding: 'utf8', windowsHide: true });
+  return { stdout: String(result.stdout), stderr: String(result.stderr) };
+}
+
+async function currentWindowsAccount(): Promise<WindowsAccount> {
+  const userResult = await runWindowsCommand('whoami', ['/user']);
+  const sid = userResult.stdout.match(WINDOWS_SID)?.[0];
+  if (!sid) throw new Error('Unable to determine the current Windows account.');
+  return { sid };
+}
+
+/**
+ * Windows does not provide a useful POSIX mode boundary for secrets. Use the
+ * native NTFS ACL APIs through the inbox PowerShell runtime instead. The
+ * script replaces the DACL with one explicit rule for the current SID, so
+ * verification is independent of localized account names and never trusts
+ * inherited defaults.
+ */
+async function protectWindowsPath(path: string, directory: boolean, account: WindowsAccount) {
+  await runWindowsCommand('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', windowsAclScript, path, account.sid, 'set', directory ? 'directory' : 'file',
+  ]);
+  await verifyWindowsPath(path, directory, account);
+}
+
+async function readWindowsAcl(path: string): Promise<WindowsAcl> {
+  const result = await runWindowsCommand('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', windowsAclScript, path, '', 'verify', 'file',
+  ]);
+  const parsed = JSON.parse(result.stdout) as { entries?: WindowsAclEntry | WindowsAclEntry[] };
+  const rawEntries = parsed.entries;
+  if (!rawEntries) throw new Error('Windows ACL query returned no DACL entries.');
+  return { entries: Array.isArray(rawEntries) ? rawEntries : [rawEntries] };
+}
+
+async function verifyWindowsPath(path: string, directory: boolean, account?: WindowsAccount) {
+  try {
+    const current = account ?? await currentWindowsAccount();
+    const acl = await readWindowsAcl(path);
+    if (acl.entries.length !== 1) throw new Error('The credential path has unexpected ACL entries.');
+    const [entry] = acl.entries;
+    if (entry.sid.toUpperCase() !== current.sid.toUpperCase() || entry.type !== 'Allow' || entry.inherited || !entry.rights.includes('FullControl') || entry.propagation !== 'None') {
+      throw new Error('The current account does not have a verified restricted ACL.');
+    }
+    const inherited = entry.inheritance.split(/[,\s]+/).filter(Boolean);
+    if (directory ? !(inherited.includes('ContainerInherit') && inherited.includes('ObjectInherit')) : inherited.length !== 1 || inherited[0] !== 'None') {
+      throw new Error('The credential path has unexpected inheritance flags.');
+    }
+  } catch {
+    throw new ControlPlaneError('invalid_configuration', 'Credential slot permissions are unsafe on this Windows host.', 'credential_ref');
+  }
+}
+
+async function protectSecretPath(path: string, directory: boolean, account: WindowsAccount) {
+  try {
+    await protectWindowsPath(path, directory, account);
+  } catch {
+    throw new ControlPlaneError('invalid_configuration', 'Unable to apply safe Windows permissions to credential storage.', 'credential_ref');
+  }
+}
+
+async function fileExists(path: string) {
+  return stat(path).then(metadata => metadata.isFile(), () => false);
+}
 
 export function validateCredentialRef(value: string | null | undefined) {
   if (value === null || value === undefined || value === '') return null;
@@ -41,20 +132,63 @@ export class SecretStore {
     const paths = patchpawPaths(this.runtimeHome);
     await mkdir(paths.secrets, { recursive: true, mode: 0o700 });
     await mkdir(this.root, { recursive: true, mode: 0o700 });
-    await chmod(paths.secrets, 0o700);
-    await chmod(this.root, 0o700);
+    let windowsAccount: WindowsAccount | undefined;
+    if (process.platform !== 'win32') {
+      await chmod(paths.secrets, 0o700);
+      await chmod(this.root, 0o700);
+    } else {
+      try {
+        windowsAccount = await currentWindowsAccount();
+        await protectWindowsPath(paths.secrets, true, windowsAccount);
+        await protectWindowsPath(this.root, true, windowsAccount);
+      } catch {
+        throw new ControlPlaneError('invalid_configuration', 'Unable to apply safe Windows permissions to credential storage.', 'credential_ref');
+      }
+    }
     const target = this.pathForRef(this.slotRef(providerId));
     const temporary = join(this.root, `.${providerId}.${randomUUID()}.tmp`);
+    let backup: string | undefined;
+    let targetPublished = false;
     try {
       await writeFile(temporary, secret, { encoding: 'utf8', mode: 0o600 });
-      await chmod(temporary, 0o600);
-      // Rename is atomic on one filesystem. The DB reference is committed only
-      // after this point, so it can never point at a missing local slot.
-      await rename(temporary, target);
-      await chmod(target, 0o600);
+      if (windowsAccount) await protectSecretPath(temporary, false, windowsAccount);
+      else await chmod(temporary, 0o600);
+
+      if (windowsAccount) {
+        // Windows rename does not replace an existing file. Keep the old slot
+        // recoverable until the new file has been protected and verified.
+        if (await fileExists(target)) {
+          // Repair the old slot's DACL before moving it out of the way. This
+          // also lets an operator rotate a slot after an ACL was accidentally
+          // broadened, while refusing the operation if the current account can
+          // no longer safely control the existing file.
+          await protectSecretPath(target, false, windowsAccount);
+          backup = join(this.root, `.${providerId}.${randomUUID()}.previous`);
+          await rename(target, backup);
+        }
+        await rename(temporary, target);
+        targetPublished = true;
+        await protectSecretPath(target, false, windowsAccount);
+        if (backup) {
+          await rm(backup, { force: true });
+          backup = undefined;
+        }
+      } else {
+        // Rename is atomic on one filesystem. The DB reference is committed
+        // only after this point, so it can never point at a missing local slot.
+        await rename(temporary, target);
+        targetPublished = true;
+        await chmod(target, 0o600);
+      }
     } catch (error) {
-      await rm(temporary, { force: true }).catch(() => undefined);
+      if (windowsAccount) {
+        if (targetPublished) await rm(target, { force: true }).catch(() => undefined);
+        if (backup) await rename(backup, target).catch(() => undefined);
+      }
       throw error;
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      if (backup) await rm(backup, { force: true }).catch(() => undefined);
     }
     return this.slotRef(providerId);
   }
@@ -82,7 +216,9 @@ export class SecretStore {
       }
       throw error;
     });
-    if (!metadata.isFile() || (metadata.mode & 0o777) !== 0o600) throw new ControlPlaneError('invalid_configuration', 'Credential slot permissions are unsafe.', 'credential_ref');
+    if (!metadata.isFile()) throw new ControlPlaneError('invalid_configuration', 'Credential slot permissions are unsafe.', 'credential_ref');
+    if (process.platform === 'win32') await verifyWindowsPath(path, false);
+    else if ((metadata.mode & 0o777) !== 0o600) throw new ControlPlaneError('invalid_configuration', 'Credential slot permissions are unsafe.', 'credential_ref');
     const value = await readFile(path, 'utf8').catch(error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new ControlPlaneError('invalid_configuration', 'Credential slot is unavailable.', 'credential_ref');
@@ -96,7 +232,18 @@ export class SecretStore {
     if (!ref) return false;
     validateCredentialRef(ref);
     if (ENV_REF.test(ref)) return !!env[ref.slice(4)];
-    return stat(this.pathForRef(ref)).then(metadata => metadata.isFile() && (metadata.mode & 0o777) === 0o600, () => false);
+    return stat(this.pathForRef(ref)).then(async metadata => {
+      if (!metadata.isFile()) return false;
+      if (process.platform === 'win32') {
+        try {
+          await verifyWindowsPath(this.pathForRef(ref), false);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return (metadata.mode & 0o777) === 0o600;
+    }, () => false);
   }
 
   private assertProviderId(providerId: string) {

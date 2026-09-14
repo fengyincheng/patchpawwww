@@ -31,8 +31,8 @@ PatchPaw's native Node runtime supports Linux, macOS, and Windows. A target repo
 ## Install and first start
 
 ```sh
-git clone <your-patchpaw-source>
-cd patchpaw
+git clone https://github.com/fengyincheng/patchpawwww.git
+cd patchpawwww
 npm ci
 cp .env.example .env
 npm run generate:admin-token
