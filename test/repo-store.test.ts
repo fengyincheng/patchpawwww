@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, stat, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { git } from '../src/workspace/git.ts';
@@ -32,7 +32,7 @@ test('one shared object database serves many independent worktrees', async () =>
   await createWorktree(f.root, 'owner/lab', wsA, f.head, f.trace);
   await createWorktree(f.root, 'owner/lab', wsB, f.main, f.trace);
   const registered = (await git(cache, ['worktree', 'list', '--porcelain'])).stdout;
-  assert.ok(registered.includes(`worktree ${wsA}`) && registered.includes(`worktree ${wsB}`));
+  assert.ok(registered.includes(`worktree ${await realpath(wsA)}`) && registered.includes(`worktree ${await realpath(wsB)}`));
   // Linked worktrees: .git is a pointer file; neither workspace owns an object database.
   for (const ws of [wsA, wsB]) {
     assert.equal((await stat(join(ws, '.git'))).isFile(), true);

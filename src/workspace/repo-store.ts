@@ -141,7 +141,6 @@ export async function isManagedWorktree(root: string, repo: string, workspace: s
     const entry = await lstat(target);
     if (!entry.isDirectory() || entry.isSymbolicLink()) return false;
     const [workspaceRoot, targetReal] = await Promise.all([realpath(patchpawPaths(root).workspaces), realpath(target)]);
-    if (targetReal !== target) return false;
     const relativeTarget = relative(workspaceRoot, targetReal);
     if (!relativeTarget || relativeTarget.includes(sep) || relativeTarget.startsWith(`..${sep}`) || relativeTarget === '..') return false;
     const listed = await git(repoCachePath(root, repo), ['worktree', 'list', '--porcelain'], trace, undefined, true);
