@@ -31,8 +31,9 @@ test('one shared object database serves many independent worktrees', async () =>
   const wsA = runWorkspacePath(f.root, 'run-a'), wsB = runWorkspacePath(f.root, 'run-b');
   await createWorktree(f.root, 'owner/lab', wsA, f.head, f.trace);
   await createWorktree(f.root, 'owner/lab', wsB, f.main, f.trace);
-  const registered = (await git(cache, ['worktree', 'list', '--porcelain'])).stdout;
-  assert.ok(registered.includes(`worktree ${await realpath(wsA)}`) && registered.includes(`worktree ${await realpath(wsB)}`));
+  const registered = (await git(cache, ['worktree', 'list', '--porcelain'])).stdout.replaceAll('\\', '/').toLowerCase();
+  assert.ok(registered.includes(`worktree ${(await realpath(wsA)).replaceAll('\\', '/').toLowerCase()}`)
+    && registered.includes(`worktree ${(await realpath(wsB)).replaceAll('\\', '/').toLowerCase()}`));
   // Linked worktrees: .git is a pointer file; neither workspace owns an object database.
   for (const ws of [wsA, wsB]) {
     assert.equal((await stat(join(ws, '.git'))).isFile(), true);
@@ -96,8 +97,8 @@ test('concurrent runs on one repo serialize shared-repo metadata without corrupt
     createWorktree(f.root, 'owner/lab', runWorkspacePath(f.root, run), i === 1 ? f.main : f.head, f.trace)));
   const cache = repoCachePath(f.root, 'owner/lab');
   assert.equal((await git(cache, ['rev-parse', 'origin/main'])).stdout.trim(), f.main);
-  const registered = (await git(cache, ['worktree', 'list', '--porcelain'])).stdout;
-  for (const run of ['run-a', 'run-b', 'run-c']) assert.ok(registered.includes(runWorkspacePath(f.root, run)));
+  const registered = (await git(cache, ['worktree', 'list', '--porcelain'])).stdout.replaceAll('\\', '/').toLowerCase();
+  for (const run of ['run-a', 'run-b', 'run-c']) assert.ok(registered.includes(runWorkspacePath(f.root, run).replaceAll('\\', '/').toLowerCase()));
   // After setup the worktrees work independently.
   assert.equal((await git(runWorkspacePath(f.root, 'run-a'), ['rev-parse', 'HEAD'])).stdout.trim(), f.head);
   assert.equal((await git(runWorkspacePath(f.root, 'run-b'), ['rev-parse', 'HEAD'])).stdout.trim(), f.main);

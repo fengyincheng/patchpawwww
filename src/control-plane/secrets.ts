@@ -58,10 +58,10 @@ async function protectWindowsPath(path: string, directory: boolean, account: Win
   await verifyWindowsPath(path, directory, account);
 }
 
-async function readWindowsAcl(path: string): Promise<WindowsAcl> {
+async function readWindowsAcl(path: string, directory: boolean): Promise<WindowsAcl> {
   const result = await runWindowsCommand('powershell.exe', [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-File', windowsAclScript, path, '', 'verify', 'file',
+    '-File', windowsAclScript, path, '', 'verify', directory ? 'directory' : 'file',
   ]);
   const parsed = JSON.parse(result.stdout) as { entries?: WindowsAclEntry | WindowsAclEntry[] };
   const rawEntries = parsed.entries;
@@ -72,7 +72,7 @@ async function readWindowsAcl(path: string): Promise<WindowsAcl> {
 async function verifyWindowsPath(path: string, directory: boolean, account?: WindowsAccount) {
   try {
     const current = account ?? await currentWindowsAccount();
-    const acl = await readWindowsAcl(path);
+    const acl = await readWindowsAcl(path, directory);
     if (acl.entries.length !== 1) throw new Error('The credential path has unexpected ACL entries.');
     const [entry] = acl.entries;
     if (entry.sid.toUpperCase() !== current.sid.toUpperCase() || entry.type !== 'Allow' || entry.inherited || !entry.rights.includes('FullControl') || entry.propagation !== 'None') {

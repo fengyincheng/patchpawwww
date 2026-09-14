@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { git } from '../src/workspace/git.ts';
 import { runPullRequest } from '../src/runner/pull-request.ts';
 import { saveHumanReply } from '../src/runner/human-feedback.ts';
@@ -18,6 +20,7 @@ import { persistInboundComment, verifyInboundNow } from '../src/runner/inbound-v
 import { closeCommunicationStore, communicationDbPath, openCommunicationStore } from '../src/runner/communication-store.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const execFileAsync = promisify(execFile);
 async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) { if (await condition()) return; await sleep(25); }
@@ -66,6 +69,8 @@ test('/close retires one PR generation and preserves the shared repo, other PRs 
   const f = await fixture(t, false);
   const target = await seedPR(f, 7, { paused: true });
   const other = await seedPR(f, 8, { paused: true });
+  const targetWorktreePath = await realpath(target.wsPath);
+  const otherWorktreePath = await realpath(other.wsPath);
   await mkdir(`${target.path}.conflict-proposals`, { recursive: true });
   await writeFile(join(`${target.path}.conflict-proposals`, 'conflict-proposal-v1.json'), '{"evidence":"retained"}\n');
   await mkdir(join(f.root, 'runs', 'no-manifest-run'), { recursive: true });
@@ -102,8 +107,9 @@ test('/close retires one PR generation and preserves the shared repo, other PRs 
   assert.deepEqual((await readdir(join(f.root, 'repos'))).filter(name => name.endsWith('.git')),
     [`${encodeURIComponent('owner/lab')}.git`]);
   const registered = (await git(repoCachePath(f.root, 'owner/lab'), ['worktree', 'list', '--porcelain'])).stdout;
-  assert.ok(!registered.includes(target.wsPath));
-  assert.ok(registered.includes(other.wsPath));
+  const normalizedRegistered = registered.replaceAll('\\', '/').toLowerCase();
+  assert.ok(!normalizedRegistered.includes(targetWorktreePath.replaceAll('\\', '/').toLowerCase()));
+  assert.ok(normalizedRegistered.includes(otherWorktreePath.replaceAll('\\', '/').toLowerCase()));
   assert.deepEqual((await readdir(join(f.root, 'workspaces'))).sort(), [other.runId]);
   const trace = new Trace(join(f.root, 'seed-trace'));
   await createWorktree(f.root, 'owner/lab', runWorkspacePath(f.root, 'post-close'), target.head, trace);
@@ -332,13 +338,18 @@ test('a corrupt paused worktree must really disappear before close claims comple
   const seeded = await seedPR(f, 7, { paused: true, memory: false });
   // Corrupt the linked worktree's gitdir pointer: disposal must still converge, and close must
   // never claim completion while the controlled directory survives.
+  if (process.platform === 'win32') {
+    await chmod(join(seeded.wsPath, '.git'), 0o600);
+    await execFileAsync('attrib', ['-R', join(seeded.wsPath, '.git')], { windowsHide: true });
+    await rm(join(seeded.wsPath, '.git'), { force: true });
+  }
   await writeFile(join(seeded.wsPath, '.git'), 'corrupt gitdir pointer');
   await f.mention('@patchpawwww /close', 100);
   const result = await runPullRequest(f.config, 'owner/lab', 7);
   assert.equal(result.status, 'closed');
   await assert.rejects(stat(seeded.wsPath), { code: 'ENOENT' }, 'a corrupt worktree is converged, never claimed away while present');
   const registered = (await git(repoCachePath(f.root, 'owner/lab'), ['worktree', 'list', '--porcelain'])).stdout;
-  assert.ok(!registered.includes(seeded.wsPath), 'its worktree metadata is pruned');
+  assert.ok(!registered.replaceAll('\\', '/').toLowerCase().includes(seeded.wsPath.replaceAll('\\', '/').toLowerCase()), 'its worktree metadata is pruned');
   assert.equal((await readState(seeded.path))?.phase, 'closed');
   assert.equal((await readState(seeded.path))?.completion_notice_status, 'published');
 });
