@@ -32,6 +32,13 @@ jobs:
           $sid = ((whoami /user | Select-String -Pattern 'S-\d-\d+(?:-\d+)+').Matches.Value)
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows/protect-acl.ps1 $probe $sid set directory
           powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows/protect-acl.ps1 $probe '' verify directory
+          $file = Join-Path $probe 'probe.key'
+          Set-Content -LiteralPath $file -Value 'probe-secret' -NoNewline
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows/protect-acl.ps1 $file $sid set file
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows/protect-acl.ps1 $file '' verify file
+
+      - name: Exercise Node child-process ACL helper
+        run: node --import tsx scripts/windows/probe-node-command.ts
 
       - name: Run test files one at a time
         run: node --import tsx scripts/run-test-files.ts
