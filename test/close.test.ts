@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { git } from '../src/workspace/git.ts';
 import { runPullRequest } from '../src/runner/pull-request.ts';
 import { saveHumanReply } from '../src/runner/human-feedback.ts';
@@ -18,6 +20,7 @@ import { persistInboundComment, verifyInboundNow } from '../src/runner/inbound-v
 import { closeCommunicationStore, communicationDbPath, openCommunicationStore } from '../src/runner/communication-store.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const execFileAsync = promisify(execFile);
 async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) { if (await condition()) return; await sleep(25); }
@@ -102,6 +105,7 @@ test('/close retires one PR generation and preserves the shared repo, other PRs 
   assert.deepEqual((await readdir(join(f.root, 'repos'))).filter(name => name.endsWith('.git')),
     [`${encodeURIComponent('owner/lab')}.git`]);
   const registered = (await git(repoCachePath(f.root, 'owner/lab'), ['worktree', 'list', '--porcelain'])).stdout;
+  console.error('WORKTREE_PATH_DEBUG', JSON.stringify({ registered, target: target.wsPath, other: other.wsPath }));
   const normalizedRegistered = registered.replaceAll('\\', '/').toLowerCase();
   assert.ok(!normalizedRegistered.includes(target.wsPath.replaceAll('\\', '/').toLowerCase()));
   assert.ok(normalizedRegistered.includes(other.wsPath.replaceAll('\\', '/').toLowerCase()));
@@ -333,7 +337,10 @@ test('a corrupt paused worktree must really disappear before close claims comple
   const seeded = await seedPR(f, 7, { paused: true, memory: false });
   // Corrupt the linked worktree's gitdir pointer: disposal must still converge, and close must
   // never claim completion while the controlled directory survives.
-  if (process.platform === 'win32') await chmod(join(seeded.wsPath, '.git'), 0o600);
+  if (process.platform === 'win32') {
+    await chmod(join(seeded.wsPath, '.git'), 0o600);
+    await execFileAsync('attrib', ['-R', join(seeded.wsPath, '.git')], { windowsHide: true });
+  }
   await writeFile(join(seeded.wsPath, '.git'), 'corrupt gitdir pointer');
   await f.mention('@patchpawwww /close', 100);
   const result = await runPullRequest(f.config, 'owner/lab', 7);
