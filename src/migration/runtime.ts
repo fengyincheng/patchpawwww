@@ -215,22 +215,38 @@ async function assertNoLegacyRuntimeProcesses(legacyRoot: string) {
     for (const path of [`/proc/${pid}/cmdline`, `/proc/${pid}/environ`]) {
       try { values.push((await readFile(path)).toString('utf8')); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+        const code = (error as NodeJS.ErrnoException).code;
+        // Hardened/containerized Linux hosts may expose a PID while denying
+        // access to that process's environment. That unrelated process cannot
+        // be attributed to PatchPaw; our own active markers and cutover locks
+        // remain the authoritative migration guard in this case.
+        if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+          throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+        }
       }
     }
     try { values.push(await readlink(`/proc/${pid}/cwd`)); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+        throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+      }
     }
     try {
       for (const fd of await readdir(`/proc/${pid}/fd`)) {
         try { values.push(await readlink(`/proc/${pid}/fd/${fd}`)); }
         catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+            throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+          }
         }
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+        throw new Error(`Cannot inspect legacy worker process ${pid}: ${(error as Error).message}`);
+      }
     }
     if (values.some(value => pathContains(legacyRoot, value))) {
       throw new Error(`Legacy runtime process ${pid} still references ${legacyRoot}; refusing migration`);
