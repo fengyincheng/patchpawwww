@@ -48,8 +48,8 @@ test('control-plane schema, paths, revisions, copy independence, and atomic comm
   const db = await openControlPlaneDb(root);
   try {
     assert.equal((await db.execute('PRAGMA journal_mode')).rows[0].journal_mode, 'wal');
-    assert.equal(await db.getMeta('schema_version'), '2');
-    assert.equal(await db.getMeta('migration_version'), '2');
+    assert.equal(await db.getMeta('schema_version'), '3');
+    assert.equal(await db.getMeta('migration_version'), '3');
     assert.equal(patchpawPaths(root).controlPlaneDb, db.path);
     assert.notEqual(db.path, patchpawPaths(root).communicationDb);
 

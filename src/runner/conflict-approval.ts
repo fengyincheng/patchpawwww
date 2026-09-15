@@ -54,6 +54,10 @@ export interface ConflictApprovalRecord {
   source_comment_url: string;
   source_comment_created_at?: string;
   author: string;
+  /** Numeric identity is retained for GitLab live permission rechecks. */
+  author_id?: string;
+  /** GitHub keeps author_association semantics; GitLab stores its project role here. */
+  platform?: 'github' | 'gitlab';
   author_association: string;
   received_at: string;
   verified_at: string;
@@ -126,7 +130,12 @@ function assertRecord(value: ConflictApprovalRecord) {
   }
   try { if (new URL(value.source_comment_url).protocol !== 'https:') throw new Error(); } catch { throw new Error('Conflict approval source URL is invalid'); }
   if (!value.author || !value.author_association) throw new Error('Conflict approval actor identity is incomplete');
-  if (value.status === 'accepted' && !QUALIFIED_APPROVAL_ASSOCIATIONS.has(value.author_association.toUpperCase())) throw new Error('Conflict approval actor is not qualified');
+  if (value.status === 'accepted') {
+    const qualified = value.platform === 'gitlab'
+      ? ['DEVELOPER', 'MAINTAINER', 'OWNER'].includes(value.author_association.toUpperCase())
+      : QUALIFIED_APPROVAL_ASSOCIATIONS.has(value.author_association.toUpperCase());
+    if (!qualified) throw new Error('Conflict approval actor is not qualified');
+  }
   if (!value.proposal_id || !Number.isSafeInteger(value.proposal_revision) || value.proposal_revision < 1 || !value.proposal_hash) {
     throw new Error('Conflict approval proposal identity is incomplete');
   }

@@ -32,8 +32,11 @@ export async function git(cwd: string, args: string[], trace?: Trace, env?: Node
   if (result.exitCode !== 0 && !allowFailure) throw new Error(`Git command failed: ${args[0]} (exit ${result.exitCode})`);
   return result;
 }
-export function gitAuth(token: string): NodeJS.ProcessEnv {
+export function gitAuth(token: string, remoteUrl = 'https://github.com', username = 'x-access-token'): NodeJS.ProcessEnv {
+  const origin = new URL(remoteUrl);
+  if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash) throw new Error('Git remote URL is unsafe for authenticated transport');
+  const host = `${origin.protocol}//${origin.host}`;
   return { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '1',
-    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}` };
+    GIT_CONFIG_KEY_0: `http.${host}/.extraheader`,
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`${username}:${token}`).toString('base64')}` };
 }

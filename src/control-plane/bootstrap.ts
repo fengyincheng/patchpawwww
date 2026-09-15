@@ -5,13 +5,14 @@ import { withFileLock } from '../platform/lock.ts';
 import { patchpawPaths } from '../config/paths.ts';
 import { loadOperation } from '../operation/load.ts';
 import { openControlPlaneDb, isoNow, type ControlPlaneDb, type ControlPlaneTransaction } from './db.ts';
+import { CONTROL_PLANE_MIGRATION_VERSION } from './schema.ts';
 import { ControlPlaneError } from './errors.ts';
-import { contentDigest, createId, findMarker, normalizeAssetSlug, normalizeRepositoryName, putMarker } from './common.ts';
+import { contentDigest, createId, findMarker, normalizeAssetSlug, normalizeRepositoryName, putMarker, repositoryStorageKey } from './common.ts';
 import { repositoryFromRow } from './common.ts';
 import { discoverManagedRepositories } from './managed-repositories.ts';
 import { promptFromRow } from './prompts.ts';
 import { skillFromRow } from './skills.ts';
-import type { BootstrapOptions, BootstrapReport, PromptAsset, Provider, ProviderModel, Repository, SkillAsset } from './types.ts';
+import type { BootstrapOptions, BootstrapReport, BootstrapRepositoryInput, PromptAsset, Provider, ProviderModel, Repository, SkillAsset } from './types.ts';
 
 export const CONTROL_PLANE_BOOTSTRAP_VERSION = 'patchpaw-bootstrap-v1';
 const defaultOperationRoot = fileURLToPath(new URL('../../operation/', import.meta.url));
@@ -42,15 +43,20 @@ async function lockBootstrap<T>(runtimeHome: string, work: () => Promise<T>) {
     { timeoutMs: 600_000, reentrant: false }, work);
 }
 
-async function repositoryInTransaction(transaction: ControlPlaneTransaction, fullName: string, displayName?: string) {
-  const normalized = normalizeRepositoryName(fullName);
-  const found = await transaction.execute('SELECT * FROM repositories WHERE full_name_normalized = :full_name_normalized', { full_name_normalized: normalized });
+async function repositoryInTransaction(transaction: ControlPlaneTransaction, input: BootstrapRepositoryInput) {
+  const normalized = input.scmKind === 'gitlab' ? repositoryStorageKey(input) : normalizeRepositoryName(input.fullName);
+  const found = input.scmKind === 'gitlab'
+    ? await transaction.execute('SELECT * FROM repositories WHERE connection_id = :connection_id AND remote_project_id = :remote_project_id', { connection_id: input.connectionId ?? null, remote_project_id: String(input.remoteProjectId ?? '') })
+    : await transaction.execute("SELECT * FROM repositories WHERE full_name_normalized = :full_name_normalized AND scm_kind = 'github'", { full_name_normalized: normalized });
   if (found.rows[0]) return { repository: repositoryFromRow(found.rows[0]), created: false };
   const now = isoNow();
-  const repository: Repository = { id: createId(), fullNameNormalized: normalized, displayName: displayName?.trim() || fullName.trim(), revision: 1, createdAt: now, updatedAt: now };
-  await transaction.execute(`INSERT INTO repositories(id, full_name_normalized, display_name, revision, created_at, updated_at)
-    VALUES (:id, :full_name_normalized, :display_name, 1, :created_at, :updated_at)`, { id: repository.id, full_name_normalized: normalized,
-    display_name: repository.displayName, created_at: now, updated_at: now });
+  const repository: Repository = { id: createId(), fullNameNormalized: normalized, displayName: input.displayName?.trim() || input.fullName.trim(), scmKind: input.scmKind ?? 'github', connectionId: input.connectionId ?? null,
+    remoteProjectId: input.remoteProjectId === null || input.remoteProjectId === undefined ? null : String(input.remoteProjectId), pathWithNamespace: input.pathWithNamespace ?? null,
+    webUrl: input.webUrl ?? null, cloneUrl: input.cloneUrl ?? null, storageKey: input.storageKey ?? repositoryStorageKey(input), revision: 1, createdAt: now, updatedAt: now };
+  await transaction.execute(`INSERT INTO repositories(id, full_name_normalized, display_name, scm_kind, connection_id, remote_project_id, path_with_namespace, web_url, clone_url, storage_key, revision, created_at, updated_at)
+    VALUES (:id, :full_name_normalized, :display_name, :scm_kind, :connection_id, :remote_project_id, :path_with_namespace, :web_url, :clone_url, :storage_key, 1, :created_at, :updated_at)`, { id: repository.id, full_name_normalized: normalized,
+    display_name: repository.displayName, scm_kind: repository.scmKind, connection_id: repository.connectionId, remote_project_id: repository.remoteProjectId, path_with_namespace: repository.pathWithNamespace,
+    web_url: repository.webUrl, clone_url: repository.cloneUrl, storage_key: repository.storageKey, created_at: now, updated_at: now });
   return { repository, created: true };
 }
 
@@ -296,7 +302,7 @@ export async function bootstrapControlPlane(options: BootstrapOptions): Promise<
       const repositoryResults: BootstrapReport['repositoryResults'] = [];
       const repositories: Repository[] = [];
       for (const input of repositoryInputs) {
-        const managed = await repositoryInTransaction(transaction, input.fullName, input.displayName);
+        const managed = await repositoryInTransaction(transaction, input);
         repositories.push(managed.repository);
         const copied = await copyAssetsForRepository(transaction, managed.repository, publicPrompts, publicSkills);
         const sharedRows = await transaction.execute(`SELECT * FROM prompt_assets
@@ -318,7 +324,7 @@ export async function bootstrapControlPlane(options: BootstrapOptions): Promise<
       }
       await db.setMeta('bootstrap_version', CONTROL_PLANE_BOOTSTRAP_VERSION, transaction);
       await db.setMeta('bootstrap_completed_at', isoNow(), transaction);
-      return { bootstrapVersion: CONTROL_PLANE_BOOTSTRAP_VERSION, migrationVersion: 1, repositories, publicPrompts, publicSkills,
+      return { bootstrapVersion: CONTROL_PLANE_BOOTSTRAP_VERSION, migrationVersion: CONTROL_PLANE_MIGRATION_VERSION, repositories, publicPrompts, publicSkills,
         provider: providerSeed.provider, model: modelSeed.model, repositoryResults };
     }));
   } finally { if (ownsDb) db.close(); }

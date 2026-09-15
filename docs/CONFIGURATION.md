@@ -2,11 +2,25 @@
 
 PatchPaw 从项目根目录的 `.env` 读取启动配置。请以 `.env.example` 为模板，复制后逐项填写；`.env`、GitHub App 私钥、Webhook secret 和模型密钥都不应提交。
 
-## 必填配置
+## 平台配置
+
+Configure GitHub, GitLab, or both. GitHub keeps its existing App variables. GitLab uses one JSON connection array and can address GitLab.com or self-managed instances.
+
+### GitLab connection
+
+```dotenv
+PATCHPAW_GITLAB_CONNECTIONS=[{"id":"gitlab-prod","instance_url":"https://gitlab.example.com","project_ids":["42"],"token_env":"PATCHPAW_GITLAB_TOKEN","webhook_secret_env":"PATCHPAW_GITLAB_WEBHOOK_SECRET","webhook_mode":"secret","bot_login":"patchpaw"}]
+PATCHPAW_GITLAB_TOKEN=replace-me
+PATCHPAW_GITLAB_WEBHOOK_SECRET=replace-me
+```
+
+`id` must be unique. `project_ids` is the allowlist. `webhook_mode` is `secret` or `signing`; signing mode uses Standard Webhooks headers. Use the Settings page to persist connections and protected credential slots instead of putting token values in the JSON string. Full setup and permission details are in [GitLab setup](GITLAB.md).
+
+### GitHub variables
 
 | 变量 | 用途 |
 | --- | --- |
-| `PATCHPAW_GITHUB_APP_ID` | GitHub App 的数字 ID。 |
+| `PATCHPAW_GITHUB_APP_ID` | GitHub App 的数字 ID；使用 GitLab 时可省略整组 GitHub 变量。 |
 | `PATCHPAW_GITHUB_APP_SLUG` | GitHub App slug，用于识别 App bot。 |
 | `PATCHPAW_GITHUB_WEBHOOK_SECRET` | GitHub App Webhook 签名密钥。 |
 | `PATCHPAW_GITHUB_PRIVATE_KEY_PATH` | App 私钥 PEM 路径；相对路径从项目根目录解析。 |
@@ -14,7 +28,7 @@ PatchPaw 从项目根目录的 `.env` 读取启动配置。请以 `.env.example`
 | `PATCHPAW_PORT` | 本机监听端口。 |
 | `PATCHPAW_GITHUB_TEST_REPO` | 事件处理路径使用的 `owner/repository`。 |
 
-生产环境推荐 `PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com`，由反向代理终止 TLS。localhost 开发可以使用明确的 `http://localhost:3000`，但不要把 HTTP 当作生产配置。公开来源、浏览器和 Webhook 的 scheme、host、port 应一致；Webhook 另加 `/github/webhook` 路径。
+生产环境推荐 `PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com`，由反向代理终止 TLS。localhost 开发可以使用明确的 `http://localhost:3000`，但不要把 HTTP 当作生产配置。公开来源、浏览器和 Webhook 的 scheme、host、port 应一致；GitHub Webhook 使用 `/github/webhook`，GitLab Webhook 使用 `/gitlab/webhook/<connection-id>`。
 
 ## 管理员 token
 

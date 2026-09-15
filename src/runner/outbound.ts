@@ -13,6 +13,7 @@ import type {
   ReviewPayload, SafeCommunicationError,
 } from './communication-types.ts';
 import { LIFECYCLE_PURPOSES } from './communication-types.ts';
+import type { ScmAdapter } from '../scm/types.ts';
 
 export { wakeCommunicationScheduler as wakeOutboundScheduler } from './communication-wake.ts';
 export { registerCommunicationWake as registerOutboundWake } from './communication-wake.ts';
@@ -30,7 +31,8 @@ export const OUTBOUND_SENDING_LEASE_MS = 30_000;
 export const OUTBOUND_LOCK_BUSY_RETRY_MS = 1_000;
 
 export interface OutboundConnection {
-  client: Octokit;
+  client?: Octokit;
+  adapter?: ScmAdapter;
   botLogin?: string;
 }
 
@@ -143,6 +145,21 @@ async function listExistingComment(client: Octokit, repo: string, number: number
 
 async function send(stored: StoredItem, connection: OutboundConnection) {
   const { item } = stored;
+  if (connection.adapter) {
+    const adapter = connection.adapter;
+    const projectId = typeof item.source.project_id === 'string' || typeof item.source.project_id === 'number'
+      ? String(item.source.project_id) : item.repo.match(/^gitlab:.+:project:(.+)$/)?.[1];
+    if (!projectId) throw new Error('SCM delivery is missing its remote project id');
+    if (item.kind === 'comment') {
+      const payload = item.payload as CommentPayload;
+      const receipt = await adapter.publishComment(projectId, item.pr_number, payload.body, [item.marker, ...(payload.legacy_markers ?? [])]);
+      return { id: receipt.id, html_url: receipt.htmlUrl, published_at: receipt.publishedAt, reused: receipt.reused, remote_adopted: receipt.remoteAdopted };
+    }
+    const payload = item.payload as ReviewPayload;
+    const receipt = await adapter.publishReview(projectId, item.pr_number, payload.head_sha, payload.review, payload.mentions, item.marker);
+    return { id: receipt.id, html_url: receipt.htmlUrl, commit_id: receipt.commitId ?? payload.head_sha, published_at: receipt.publishedAt, reused: receipt.reused, remote_adopted: receipt.remoteAdopted };
+  }
+  if (!connection.client) throw new Error('GitHub delivery is missing its client');
   if (item.kind === 'comment') {
     const payload = item.payload as CommentPayload;
     if (item.attempt_count > 1 || payload.legacy_markers?.length) {

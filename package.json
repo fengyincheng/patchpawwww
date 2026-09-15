@@ -1,7 +1,7 @@
 {
   "name": "patchpaw",
   "version": "0.0.0",
-  "description": "Self-hosted GitHub App service for repository review, repair, conflict analysis, and conversation.",
+  "description": "Self-hosted GitHub App and GitLab integration for repository review, repair, CI and conversation.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

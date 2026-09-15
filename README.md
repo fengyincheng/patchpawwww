@@ -1,8 +1,8 @@
 # PatchPaw
 
-自托管的 GitHub App：在 Pull Request 评论中与 Agent 对话、请求代码审查、修复 CI、分析冲突，通过 Web 控制台管理仓库、模型、Prompt、Skill 和命令。
+自托管的 GitHub App / GitLab 集成：在 Pull Request 或 Merge Request 评论中与 Agent 对话、请求代码审查、读取 CI、分析冲突，通过 Web 控制台管理仓库、模型、Prompt、Skill、命令和 SCM 连接。
 
-[English](README.en.md) · [运维说明](docs/OPERATIONS.md) · [安全边界](docs/SECURITY-MODEL.md) · [贡献指南](CONTRIBUTING.md)
+[English](README.en.md) · [GitLab 配置](docs/GITLAB.md) · [运维说明](docs/OPERATIONS.md) · [安全边界](docs/SECURITY-MODEL.md) · [贡献指南](CONTRIBUTING.md)
 
 这是早期版本，适合愿意自行部署和维护的用户。当前发布支持 Linux、macOS，生产部署推荐 Linux。**暂不支持原生 Windows，目前没有官方 Docker 镜像；未来会考虑提供可在 Windows Docker 环境运行的 Linux 镜像，暂无时间表。**
 
@@ -13,6 +13,7 @@
 - 一台可长期运行的 Linux 主机或 macOS，Node.js **22.22.0+ 的 22.x 版本**、npm、Git。
 - 一个域名或已有域名的子域名，可以配置 DNS 和 HTTPS 反向代理。
 - 一个你有权创建并安装到目标仓库的 GitHub App，下面会逐项引导。
+- 或一个有权访问目标项目的 GitLab Personal/Project Access Token；GitLab.com 和自托管实例均可，配置方法见 [GitLab 配置](docs/GITLAB.md)。
 - 模型 API 凭据：支持 Zhipu/Z.ai、DeepSeek、OpenRouter、Kimi、Qwen。需自行确认模型、端点、费用和数据政策。
 - 目标项目运行检查所需的工具链，例如 Python、编译器或包管理器；PatchPaw 不会自动准备所有项目依赖。
 
@@ -86,6 +87,8 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 服务尚未启动时，首次 ping 失败是正常的，部署后再检查投递。参考：[GitHub 注册指南](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)、[权限指南](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)、[PR 评论接口权限](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment)。
 
 ## 3. 安装并填写配置
+
+如果只使用 GitLab，可跳过 GitHub App 注册部分，直接按 [GitLab 配置](docs/GITLAB.md) 设置 `PATCHPAW_GITLAB_CONNECTIONS`；GitHub 与 GitLab 也可以在同一进程中共存。
 
 在运行服务的专用账号下执行：
 
@@ -320,10 +323,12 @@ patchpawwww/
 │   ├── state/owner__repo/  # PR 状态、暂停/关闭记录和相关方案
 │   └── outbox/             # 文件型发件辅助数据
 ├── secrets/providers/      # 服务端模型凭据
+├── secrets/scm/            # GitLab API/Git HTTPS token slots
+├── secrets/scm-webhook/    # GitLab Webhook secret slots
 ├── repos/<encoded-repo>.git/ # 每仓库一份共享 bare 对象库
 ├── workspaces/<run-id>/     # 执行工作区（Git linked worktree）
 ├── runs/<run-id>/           # trace、产物、验证证据和配置快照
-├── snapshots/              # GitHub 事件快照
+├── snapshots/              # GitHub/GitLab 事件快照
 ├── logs/                   # 服务运行日志
 ├── locks/                  # 运行/仓库等协调锁
 ├── backups/                # 备份

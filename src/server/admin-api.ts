@@ -24,6 +24,7 @@ import {
   getProvider,
   getProviderModel,
   getRepositoryByName,
+  getRepository,
   getSkill,
   listCommands,
   listProviderModels,
@@ -51,10 +52,19 @@ import {
   type ProviderInput,
   type ProviderModel,
   type SkillAsset,
+  createScmConnection,
+  deleteScmConnection,
+  getScmConnection,
+  listScmConnections,
+  updateScmConnection,
+  type ScmConnectionInput,
 } from '../control-plane/index.ts';
 import { normalizeRepositoryName } from '../control-plane/common.ts';
 import type { GitHubReader } from '../github/client.ts';
 import { normalizeOrigin } from './public-setup.ts';
+import { SecretStore } from '../control-plane/secrets.ts';
+import type { ScmConnection } from '../scm/types.ts';
+import { GitLabClient } from '../scm/gitlab/client.ts';
 
 const ADMIN_COOKIE = 'patchpaw_admin_session';
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -74,6 +84,31 @@ export interface AdminRepositoryDto {
   id: string;
   full_name: string;
   display_name: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  scm_kind?: 'github' | 'gitlab';
+  connection_id?: string | null;
+  remote_project_id?: string | null;
+  path_with_namespace?: string | null;
+  web_url?: string | null;
+  clone_url?: string | null;
+  storage_key?: string;
+}
+
+export interface AdminScmConnectionDto {
+  id: string;
+  kind: ScmConnection['kind'];
+  instance_url: string;
+  credential_ref: string | null;
+  credential_configured: boolean;
+  webhook_mode: ScmConnection['webhookMode'];
+  webhook_secret_ref: string | null;
+  webhook_secret_configured: boolean;
+  bot_user_id: string | null;
+  bot_login: string | null;
+  project_ids: string[];
+  enabled: boolean;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -280,6 +315,16 @@ const profileFields = {
 };
 const profileSchema = z.object({ ...profileFields, expected_revision: revisionSchema.optional() }).strict();
 const loginSchema = z.object({ token: z.string().min(1).max(4096) }).strict();
+const scmConnectionFields = {
+  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/).optional(),
+  kind: z.literal('gitlab'), instance_url: z.string().min(1).max(2048),
+  credential_ref: z.string().regex(/^(?:env:[A-Z_][A-Z0-9_]*|slot:scm\/[A-Za-z0-9_.:-]+)$/).nullable().optional(),
+  webhook_mode: z.enum(['secret', 'signing']).optional(), webhook_secret_ref: z.string().regex(/^(?:env:[A-Z_][A-Z0-9_]*|slot:scm(?:-webhook)?\/[A-Za-z0-9_.:-]+)$/).nullable().optional(),
+  bot_user_id: z.string().max(128).nullable().optional(), bot_login: z.string().max(256).nullable().optional(), project_ids: z.array(z.string().min(1).max(256)).max(1000).optional(), enabled: z.boolean().optional(),
+};
+const scmConnectionCreateSchema = z.object(scmConnectionFields).strict().required({ kind: true, instance_url: true });
+const scmConnectionPatchSchema = z.object({ ...scmConnectionFields, expected_revision: revisionSchema.optional() }).partial().strict();
+const scmSecretSchema = z.object({ secret: z.string().min(1).max(64 * 1024) }).strict();
 
 function requestId() { return randomUUID(); }
 
@@ -381,11 +426,17 @@ function repoKey(request: FastifyRequest) {
   const raw = String((request.params as Record<string, unknown>).repo ?? '');
   let decoded: string;
   try { decoded = decodeURIComponent(raw); } catch { throw new AdminApiError('invalid_payload', 'Repository key is not safely encoded.', 422, 'repo'); }
-  try { return normalizeRepositoryName(decoded); } catch { throw new AdminApiError('invalid_payload', 'Repository key must be an encoded owner/repository pair.', 422, 'repo'); }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(decoded)) return decoded;
+  if (/^gitlab:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}:project:[^/]+$/.test(decoded)) {
+    throw new AdminApiError('invalid_payload', 'GitLab repositories must be addressed by control-plane repository UUID.', 422, 'repo');
+  }
+  try { return normalizeRepositoryName(decoded); } catch { throw new AdminApiError('invalid_payload', 'Repository key must be an encoded owner/repository pair or a GitLab storage key.', 422, 'repo'); }
 }
 
 async function repositoryFor(db: ControlPlaneDb, request: FastifyRequest) {
-  const repository = await getRepositoryByName(db, repoKey(request));
+  const key = repoKey(request);
+  const repository = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(key)
+    ? await getRepository(db, key) : await getRepositoryByName(db, key);
   if (!repository) throw new ControlPlaneError('not_found', 'Repository was not found.', 'repo');
   return repository;
 }
@@ -434,9 +485,19 @@ function profileDto(profile: ConversationProfile): AdminConversationProfileDto {
       position: binding.position, enabled: binding.enabled })), created_at: profile.createdAt, updated_at: profile.updatedAt };
 }
 
-function repositoryDto(repository: { id: string; fullNameNormalized: string; displayName: string; revision: number; createdAt: string; updatedAt: string }): AdminRepositoryDto {
-  return { id: repository.id, full_name: repository.fullNameNormalized, display_name: repository.displayName, revision: repository.revision,
+function repositoryDto(repository: { id: string; fullNameNormalized: string; displayName: string; revision: number; createdAt: string; updatedAt: string; scmKind?: 'github' | 'gitlab'; connectionId?: string | null; remoteProjectId?: string | null; pathWithNamespace?: string | null; webUrl?: string | null; cloneUrl?: string | null; storageKey?: string }): AdminRepositoryDto {
+  return { id: repository.id, full_name: repository.scmKind === 'gitlab' ? repository.storageKey ?? repository.fullNameNormalized : repository.fullNameNormalized, display_name: repository.displayName, revision: repository.revision,
+    ...(repository.scmKind ? { scm_kind: repository.scmKind, connection_id: repository.connectionId ?? null, remote_project_id: repository.remoteProjectId ?? null,
+      path_with_namespace: repository.pathWithNamespace ?? null, web_url: repository.webUrl ?? null, clone_url: repository.cloneUrl ?? null, storage_key: repository.storageKey } : {}),
     created_at: repository.createdAt, updated_at: repository.updatedAt };
+}
+
+async function scmConnectionDto(connection: ScmConnection, root: string): Promise<AdminScmConnectionDto> {
+  const secrets = new SecretStore(root);
+  return { id: connection.id, kind: connection.kind, instance_url: connection.instanceUrl, credential_ref: connection.credentialRef,
+    credential_configured: await secrets.isConfigured(connection.credentialRef), webhook_mode: connection.webhookMode, webhook_secret_ref: connection.webhookSecretRef,
+    webhook_secret_configured: await secrets.isConfigured(connection.webhookSecretRef), bot_user_id: connection.botUserId, bot_login: connection.botLogin, project_ids: connection.projectIds,
+    enabled: connection.enabled, revision: connection.revision ?? 1, created_at: connection.createdAt, updated_at: connection.updatedAt };
 }
 
 const SAFE_REQUEST_OPTIONS = new Set([
@@ -640,6 +701,62 @@ export function registerAdminApi(app: FastifyInstance, config: AdminApiConfig, _
 
   app.get('/api/admin/repositories', { preHandler: guarded() }, withRoute(async () => {
     return (await listRepositories(await db())).map(repositoryDto);
+  }));
+  app.get('/api/admin/scm-connections', { preHandler: guarded() }, withRoute(async () => {
+    const store = await db(); return Promise.all((await listScmConnections(store)).map(value => scmConnectionDto(value, config.root)));
+  }));
+  app.post('/api/admin/scm-connections', { preHandler: guarded(true) }, withRoute(async request => {
+    const body = parseBody(request, scmConnectionCreateSchema);
+    const connection = await createScmConnection(await db(), { id: body.id, kind: body.kind, instanceUrl: body.instance_url, credentialRef: body.credential_ref,
+      webhookMode: body.webhook_mode, webhookSecretRef: body.webhook_secret_ref, botUserId: body.bot_user_id, botLogin: body.bot_login, projectIds: body.project_ids, enabled: body.enabled });
+    return scmConnectionDto(connection, config.root);
+  }));
+  app.get('/api/admin/scm-connections/:id', { preHandler: guarded() }, withRoute(async request => {
+    const connection = await getScmConnection(await db(), String((request.params as Record<string, string>).id));
+    if (!connection) throw new ControlPlaneError('not_found', 'SCM connection was not found.', 'id');
+    return scmConnectionDto(connection, config.root);
+  }));
+  app.patch('/api/admin/scm-connections/:id', { preHandler: guarded(true) }, withRoute(async request => {
+    const body = parseBody(request, scmConnectionPatchSchema); const id = String((request.params as Record<string, string>).id);
+    const connection = await updateScmConnection(await db(), id, { kind: body.kind, instanceUrl: body.instance_url, credentialRef: body.credential_ref, webhookMode: body.webhook_mode,
+      webhookSecretRef: body.webhook_secret_ref, botUserId: body.bot_user_id, botLogin: body.bot_login, projectIds: body.project_ids, enabled: body.enabled }, { expectedRevision: body.expected_revision });
+    return scmConnectionDto(connection, config.root);
+  }));
+  app.delete('/api/admin/scm-connections/:id', { preHandler: guarded(true) }, withRoute(async request => {
+    const id = String((request.params as Record<string, string>).id); const connection = await getScmConnection(await db(), id);
+    if (!connection) throw new ControlPlaneError('not_found', 'SCM connection was not found.', 'id');
+    await deleteScmConnection(await db(), id);
+    const secrets = new SecretStore(config.root);
+    if (connection.credentialRef === secrets.scmSlotRef(id)) await secrets.deleteScmSecret(id);
+    if (connection.webhookSecretRef === secrets.scmWebhookSlotRef(id)) await secrets.deleteScmWebhookSecret(id);
+    return { deleted: true, id };
+  }));
+  app.put('/api/admin/scm-connections/:id/credential', { preHandler: guarded(true) }, withRoute(async request => {
+    const body = parseBody(request, scmSecretSchema); const id = String((request.params as Record<string, string>).id); const connection = await getScmConnection(await db(), id);
+    if (!connection) throw new ControlPlaneError('not_found', 'SCM connection was not found.', 'id');
+    const ref = await new SecretStore(config.root).writeScmSecret(id, body.secret);
+    const updated = await updateScmConnection(await db(), id, { credentialRef: ref }, { expectedRevision: connection.revision });
+    return scmConnectionDto(updated, config.root);
+  }));
+  app.put('/api/admin/scm-connections/:id/webhook-secret', { preHandler: guarded(true) }, withRoute(async request => {
+    const body = parseBody(request, scmSecretSchema); const id = String((request.params as Record<string, string>).id); const connection = await getScmConnection(await db(), id);
+    if (!connection) throw new ControlPlaneError('not_found', 'SCM connection was not found.', 'id');
+    const ref = await new SecretStore(config.root).writeScmWebhookSecret(id, body.secret);
+    const updated = await updateScmConnection(await db(), id, { webhookSecretRef: ref }, { expectedRevision: connection.revision });
+    return scmConnectionDto(updated, config.root);
+  }));
+  app.post('/api/admin/scm-connections/:id/verify', { preHandler: guarded(true) }, withRoute(async request => {
+    const connection = await getScmConnection(await db(), String((request.params as Record<string, string>).id));
+    if (!connection) throw new ControlPlaneError('not_found', 'SCM connection was not found.', 'id');
+    if (connection.kind !== 'gitlab' || !connection.credentialRef) return { status: 'unsupported', connection: await scmConnectionDto(connection, config.root) };
+    const token = await new SecretStore(config.root).read(connection.credentialRef); const client = new GitLabClient({ baseUrl: connection.instanceUrl, token });
+    const { data: user } = await client.user(); const projects = [];
+    for (const projectId of connection.projectIds) { const { data: project } = await client.project(projectId); projects.push({ id: String(project.id), path_with_namespace: project.path_with_namespace, visible: true }); }
+    return { status: 'ok', bot: { id: String(user.id), login: String(user.username ?? user.name ?? '') }, projects };
+  }));
+  app.get('/api/admin/repositories/by-id/:id', { preHandler: guarded() }, withRoute(async request => {
+    const repository = await getRepository(await db(), String((request.params as Record<string, string>).id));
+    if (!repository) throw new ControlPlaneError('not_found', 'Repository was not found.', 'id'); return repositoryDto(repository);
   }));
   app.get('/api/admin/repositories/:repo', { preHandler: guarded() }, withRoute(async request => {
     return repositoryDto(await repositoryFor(await db(), request));

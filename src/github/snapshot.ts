@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { GitHubReader } from './client.ts';
+import { safeStorageDirectory } from '../scm/identity.ts';
 
 const fullName = z.string().regex(/^[\w.-]+\/[\w.-]+$/);
 const revision = z.object({ ref: z.string().min(1), sha: z.string().regex(/^[a-f0-9]{40}$/) });
@@ -34,7 +35,8 @@ export type PRSnapshot = ReturnType<typeof normalizeSnapshot>;
 // Exact snapshot subtree of one PR, shared by the writer and by lifecycle cleanup (/close)
 // so the repo-key rule is never duplicated.
 export function snapshotPRDir(root: string, fullNameValue: string, number: number) {
-  return join(root, fullNameValue.replace('/', '__'), `pr-${number}`);
+  const directory = fullNameValue.startsWith('gitlab:') ? safeStorageDirectory(fullNameValue) : fullNameValue.replace('/', '__');
+  return join(root, directory, `pr-${number}`);
 }
 export async function saveSnapshot(root: string, snapshot: PRSnapshot) {
   const path = join(snapshotPRDir(root, snapshot.repository.full_name, snapshot.pull_request.number), `${snapshot.delivery_id}.json`);

@@ -13,3 +13,4 @@ export * from './snapshots.ts';
 export * from './resolver.ts';
 export * from './managed-repositories.ts';
 export * from './bootstrap.ts';
+export * from './scm-connections.ts';

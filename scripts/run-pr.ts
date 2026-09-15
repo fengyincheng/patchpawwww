@@ -3,9 +3,13 @@ import { runPullRequest } from '../src/runner/pull-request.ts';
 import { hasRunnableWork } from '../src/runner/runnable.ts';
 import { withRuntimeLock } from '../src/migration/runtime-lock.ts';
 import { closeControlPlaneDb, openPreparedControlPlaneDb, prepareControlPlaneDb } from '../src/control-plane/db.ts';
-const [repo, rawNumber] = process.argv.slice(2);
-if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !/^[1-9]\d*$/.test(rawNumber ?? '')) {
-  throw new Error('Usage: npm run run-pr -- owner/repo number');
+import { getRepository } from '../src/control-plane/repositories.ts';
+const [firstArg, secondArg, thirdArg] = process.argv.slice(2);
+const explicitRepositoryId = firstArg === '--repository-id' ? secondArg : undefined;
+const rawNumber = firstArg === '--repository-id' ? thirdArg : secondArg;
+if ((!explicitRepositoryId && !firstArg) || !/^[1-9]\d*$/.test(rawNumber ?? '')
+  || (!explicitRepositoryId && !(/^[\w.-]+\/[\w.-]+$/.test(firstArg) || /^gitlab:[A-Za-z0-9][A-Za-z0-9_.:-]*:project:[^/]+$/.test(firstArg)))) {
+  throw new Error('Usage: npm run run-pr -- owner/repo number | gitlab:connection:project:id number | --repository-id UUID number');
 }
 const loaded = loadConfig();
 // Schema migration is an exclusive operation and must finish before this worker
@@ -13,6 +17,15 @@ const loaded = loadConfig();
 await prepareControlPlaneDb(loaded.runtimeHome);
 await withRuntimeLock(loaded.runtimeHome, 'shared', false, async () => {
   const config = { ...loaded, root: loaded.runtimeHome };
+  let repo = firstArg ?? '';
+  if (explicitRepositoryId) {
+    const controlPlaneDb = await openPreparedControlPlaneDb(config.root);
+    try {
+      const repository = await getRepository(controlPlaneDb, explicitRepositoryId);
+      if (!repository) throw new Error(`Repository UUID was not found: ${explicitRepositoryId}`);
+      repo = repository.storageKey;
+    } finally { closeControlPlaneDb(controlPlaneDb); }
+  }
   while (await hasRunnableWork(config.root, repo, Number(rawNumber))) {
     const controlPlaneDb = await openPreparedControlPlaneDb(config.root);
     try {

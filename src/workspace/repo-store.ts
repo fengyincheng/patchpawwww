@@ -4,11 +4,13 @@ import { git } from './git.ts';
 import type { Trace } from '../harness/trace.ts';
 import { patchpawPaths } from '../config/paths.ts';
 import { withFileLock } from '../platform/lock.ts';
+import { safeStorageDirectory } from '../scm/identity.ts';
 
 // One GitHub repository = one persistent bare object store under repos; runs get Git
 // worktrees, never clones. The cache outlives runs, so it must never live under a run directory.
 export function repoCachePath(runtimeHome: string, repo: string) {
-  return join(patchpawPaths(runtimeHome).repos, `${encodeURIComponent(repo.toLowerCase())}.git`);
+  const directory = repo.startsWith('gitlab:') ? safeStorageDirectory(repo) : encodeURIComponent(repo.toLowerCase());
+  return join(patchpawPaths(runtimeHome).repos, `${directory}.git`);
 }
 export function runWorkspacePath(runtimeHome: string, runId: string) {
   return join(patchpawPaths(runtimeHome).workspaces, runId);
@@ -73,9 +75,10 @@ export async function ensureRepo(root: string, repo: string, cloneUrl: string, t
 // no branch checkout: the exact PR head object plus the current target branch tip, forcing the
 // remote-tracking ref so a rewound base branch is still reflected. Automatic GC stays off while
 // worktrees are active; explicit maintenance is a separate later concern.
-export async function fetchPRState(root: string, repo: string, input: { headSha: string; baseRef: string }, trace: Trace, env?: NodeJS.ProcessEnv) {
+export async function fetchPRState(root: string, repo: string, input: { headSha: string; baseRef: string; sourceRemoteUrl?: string }, trace: Trace, env?: NodeJS.ProcessEnv) {
   const cache = repoCachePath(root, repo);
   return withRepoLock(cache, async () => {
+    if (input.sourceRemoteUrl) await git(cache, ['-c', 'gc.auto=0', 'fetch', '--no-tags', input.sourceRemoteUrl, input.headSha], trace, env);
     await git(cache, ['-c', 'gc.auto=0', 'fetch', '--no-tags', 'origin', input.headSha,
       `+refs/heads/${input.baseRef}:refs/remotes/origin/${input.baseRef}`], trace, env);
     const currentBaseTipSha = (await git(cache, ['rev-parse', `refs/remotes/origin/${input.baseRef}`], trace)).stdout.trim();

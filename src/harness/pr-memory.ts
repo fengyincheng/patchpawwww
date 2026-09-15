@@ -3,9 +3,12 @@ import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { changeRequestThreadId } from '../scm/identity.ts';
 
 export interface PRMemory { root: string; repo: string; number: number }
-export function prThreadId(repo: string, number: number) { return `github:${repo.toLowerCase()}:pr:${number}`; }
+export function prThreadId(repo: string, number: number) {
+  return repo.startsWith('gitlab:') ? changeRequestThreadId('gitlab', repo.toLowerCase(), number) : `github:${repo.toLowerCase()}:pr:${number}`;
+}
 // Exact storage location of one PR's durable Memory database, so lifecycle code (e.g. /close)
 // never duplicates the hashing scheme or touches another PR's storage.
 export function prMemoryPath(root: string, repo: string, number: number) {

@@ -6,6 +6,7 @@ import { openCommunicationStore, closeCommunicationStore, type CommunicationStor
 import { communicationWakePath, wakeCommunicationScheduler } from './communication-wake.ts';
 import type { InboundRecord, InboundStatus, SafeCommunicationError } from './communication-types.ts';
 import { patchpawPaths } from '../config/paths.ts';
+import type { InboundScmComment, ScmInboundReader } from '../scm/types.ts';
 
 export { communicationWakePath as inboundWakePath };
 export type { InboundRecord, InboundStatus } from './communication-types.ts';
@@ -54,7 +55,7 @@ async function isRetired(root: string, record: InboundRecord) {
 
 const processing = new Set<string>();
 
-async function processOne(root: string, stored: InboundStored, github: GitHubReader, onVerified: (reply: HumanReply) => Promise<void>) {
+async function processOne(root: string, stored: InboundStored, github: GitHubReader | undefined, onVerified: (reply: HumanReply) => Promise<void>, scmReader?: ScmInboundReader | ((connectionId: string) => ScmInboundReader | undefined)) {
   const key = `${root}\u0000${stored.record.repo}\u0000${stored.record.pr_number}\u0000${stored.record.comment_id}`;
   if (processing.has(key)) return 'deferred';
   processing.add(key);
@@ -66,10 +67,20 @@ async function processOne(root: string, stored: InboundStored, github: GitHubRea
     if (record.next_attempt_at > new Date().toISOString()) return 'deferred';
     if (record.status === 'pending_verification') {
       try {
-        const verified = await github.readPullRequest(record.reply.installation_id, record.repo, record.pr_number);
-        if (!identityMatches(record, verified)) {
-          await withStore(root, store => store.markInboundRejected(record.repo, record.pr_number, record.comment_id, 'installation_repository_mismatch'));
-          return 'rejected';
+        if (record.reply.platform === 'gitlab') {
+          const reader = typeof scmReader === 'function' ? scmReader(record.reply.connection_id!) : scmReader;
+          if (!reader) throw Object.assign(new Error('GitLab verification adapter is unavailable'), { status: 503 });
+          const authorization = await reader.verifyInboundComment({ platform: 'gitlab', connectionId: record.reply.connection_id!, projectId: record.reply.project_id!,
+            changeRequestNumber: record.pr_number, remoteId: record.comment_id, authorId: record.reply.author_id!, authorLogin: record.reply.author,
+            body: record.reply.body, url: record.reply.url, createdAt: record.reply.created_at, sourceEventId: record.reply.source_event_id!, storageKey: record.repo, repositoryPath: record.reply.repository_path ?? record.repo });
+          if (!authorization.canExecute) throw Object.assign(new Error('GitLab actor is not authorized'), { status: 403 });
+        } else {
+          if (!github) throw Object.assign(new Error('GitHub verification adapter is unavailable'), { status: 503 });
+          const verified = await github.readPullRequest(record.reply.installation_id!, record.repo, record.pr_number);
+          if (!identityMatches(record, verified)) {
+            await withStore(root, store => store.markInboundRejected(record.repo, record.pr_number, record.comment_id, 'installation_repository_mismatch'));
+            return 'rejected';
+          }
         }
         await withStore(root, store => store.markInboundVerified(record.repo, record.pr_number, record.comment_id));
       } catch (error) {
@@ -103,9 +114,9 @@ async function processOne(root: string, stored: InboundStored, github: GitHubRea
   } finally { processing.delete(key); }
 }
 
-export async function verifyInboundNow(root: string, stored: InboundStored, github: GitHubReader,
-  onVerified: (reply: HumanReply) => Promise<void>) {
-  return processOne(root, stored, github, onVerified);
+export async function verifyInboundNow(root: string, stored: InboundStored, github: GitHubReader | undefined,
+  onVerified: (reply: HumanReply) => Promise<void>, scmReader?: ScmInboundReader | ((connectionId: string) => ScmInboundReader | undefined)) {
+  return processOne(root, stored, github, onVerified, scmReader);
 }
 
 /** Compatibility entry point. Production now starts the unified communication scheduler. */

@@ -23,8 +23,8 @@ test('unsupported control-plane migration fails closed and a compatible restore 
   restoreMarker.close();
   const recovered = await openControlPlaneDb(root);
   try {
-    assert.equal(await recovered.getMeta('schema_version'), '2');
-    assert.equal(await recovered.getMeta('migration_version'), '2');
+    assert.equal(await recovered.getMeta('schema_version'), '3');
+    assert.equal(await recovered.getMeta('migration_version'), '3');
     assert.equal((await recovered.execute('PRAGMA integrity_check')).rows[0]?.integrity_check, 'ok');
   } finally { closeControlPlaneDb(recovered); }
 });

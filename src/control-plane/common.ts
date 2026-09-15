@@ -3,6 +3,7 @@ import type { Row } from '@libsql/client';
 import { ControlPlaneError, invalid, notFound } from './errors.ts';
 import { booleanValue, isoNow, jsonValue, numberValue, optionalNumberValue, rowValue, textValue, type ControlPlaneExecutor, type ControlPlaneTransaction } from './db.ts';
 import type { BootstrapMarker, BootstrapMarkerState, Repository } from './types.ts';
+import { storageKey as scmStorageKey } from '../scm/identity.ts';
 
 export const RESERVED_COMMAND_NAMES = new Set(['stop', 'close', 'approval', 'approve', 'confict']);
 
@@ -56,8 +57,23 @@ export function repositoryFromRow(row: Row): Repository {
   return {
     id: textValue(row, 'id'), fullNameNormalized: textValue(row, 'full_name_normalized'),
     displayName: textValue(row, 'display_name'), revision: numberValue(row, 'revision'),
+    scmKind: textValue(row, 'scm_kind', 'github') as 'github' | 'gitlab',
+    connectionId: rowValue(row, 'connection_id') === null || rowValue(row, 'connection_id') === undefined ? null : textValue(row, 'connection_id'),
+    remoteProjectId: rowValue(row, 'remote_project_id') === null || rowValue(row, 'remote_project_id') === undefined ? null : textValue(row, 'remote_project_id'),
+    pathWithNamespace: rowValue(row, 'path_with_namespace') === null || rowValue(row, 'path_with_namespace') === undefined ? null : textValue(row, 'path_with_namespace'),
+    webUrl: rowValue(row, 'web_url') === null || rowValue(row, 'web_url') === undefined ? null : textValue(row, 'web_url'),
+    cloneUrl: rowValue(row, 'clone_url') === null || rowValue(row, 'clone_url') === undefined ? null : textValue(row, 'clone_url'),
+    storageKey: textValue(row, 'storage_key', textValue(row, 'full_name_normalized')),
     createdAt: textValue(row, 'created_at'), updatedAt: textValue(row, 'updated_at'),
   };
+}
+
+export function repositoryStorageKey(input: { scmKind?: 'github' | 'gitlab'; connectionId?: string | null; remoteProjectId?: string | number | null; fullName: string }) {
+  if (input.scmKind === 'gitlab') {
+    if (!input.connectionId || input.remoteProjectId === null || input.remoteProjectId === undefined) throw new Error('GitLab repositories require a connection id and remote project id');
+    return scmStorageKey('gitlab', input.connectionId, input.remoteProjectId);
+  }
+  return input.fullName.trim().toLowerCase();
 }
 
 export function markerFromRow(row: Row): BootstrapMarker {

@@ -56,3 +56,17 @@ test('runtime restore archives a memory database created after the backup', asyn
   assert.ok(restored.removed_databases.includes('data/memory/new.db'));
   assert.equal(await stat(join(paths.memory, 'new.db')).then(() => true, () => false), false);
 });
+
+test('runtime restore reinstalls included SCM secret slots with restricted permissions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'patchpaw-runtime-restore-scm-'));
+  const paths = patchpawPaths(root);
+  const communication = await openCommunicationStore(root);
+  await communication.close();
+  await mkdir(join(paths.secrets, 'scm'), { recursive: true });
+  await writeFile(join(paths.secrets, 'scm', 'gitlab-one.key'), 'original-token\n', { mode: 0o600 });
+  const backup = await backupRuntime({ runtimeHome: root });
+  await writeFile(join(paths.secrets, 'scm', 'gitlab-one.key'), 'changed-token\n', { mode: 0o600 });
+  await restoreRuntime({ runtimeHome: root, backupPath: backup.backup_path });
+  assert.equal(await readFile(join(paths.secrets, 'scm', 'gitlab-one.key'), 'utf8'), 'original-token\n');
+  if (process.platform !== 'win32') assert.equal((await stat(join(paths.secrets, 'scm', 'gitlab-one.key'))).mode & 0o777, 0o600);
+});

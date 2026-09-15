@@ -6,7 +6,7 @@ import type { Trace } from '../harness/trace.ts';
 
 type SavedFile = { content: Buffer; mode: number };
 export type VerificationInputs = Map<string, SavedFile>;
-const isVerificationInput = (path: string) => /(^|\/)(tests?|__tests__|specs?|test-support)\/|[._-](test|spec)[._-]|^\.github\/workflows\/|(^|\/)package\.json$/.test(path);
+const isVerificationInput = (path: string) => /(^|\/)(tests?|__tests__|specs?|test-support)\/|[._-](test|spec)[._-]|^\.github\/workflows\/|^\.gitlab-ci\.yml$|(^|\/)package\.json$/.test(path);
 
 async function readOptional(path: string): Promise<SavedFile | null> {
   try { return { content: await readFile(path), mode: (await stat(path)).mode }; }

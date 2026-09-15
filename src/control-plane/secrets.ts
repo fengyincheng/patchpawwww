@@ -9,7 +9,10 @@ import { ControlPlaneError, invalid } from './errors.ts';
 
 const ENV_REF = /^env:[A-Z_][A-Z0-9_]*$/;
 const SLOT_REF = /^slot:provider\/([a-zA-Z0-9-]+)$/;
+const SCM_SLOT_REF = /^slot:scm\/([a-zA-Z0-9_.:-]+)$/;
+const SCM_WEBHOOK_SLOT_REF = /^slot:scm-webhook\/([a-zA-Z0-9_.:-]+)$/;
 const PROVIDER_ID = /^[a-zA-Z0-9-]+$/;
+const SCM_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/;
 const WINDOWS_SID = /\bS-\d-\d+(?:-\d+)+\b/i;
 const execFileAsync = promisify(execFile);
 const windowsAclScript = fileURLToPath(new URL('../../scripts/windows/protect-acl.ps1', import.meta.url));
@@ -101,7 +104,7 @@ async function fileExists(path: string) {
 
 export function validateCredentialRef(value: string | null | undefined) {
   if (value === null || value === undefined || value === '') return null;
-  if (!ENV_REF.test(value) && !SLOT_REF.test(value)) invalid('Credential reference must be an env reference or provider slot.', 'credential_ref');
+  if (!ENV_REF.test(value) && !SLOT_REF.test(value) && !SCM_SLOT_REF.test(value) && !SCM_WEBHOOK_SLOT_REF.test(value)) invalid('Credential reference must be an env reference or SCM/provider slot.', 'credential_ref');
   return value;
 }
 
@@ -117,11 +120,24 @@ export class SecretStore {
     return `slot:provider/${providerId}`;
   }
 
+  scmSlotRef(connectionId: string) {
+    this.assertScmId(connectionId);
+    return `slot:scm/${connectionId}`;
+  }
+
+  scmWebhookSlotRef(connectionId: string) {
+    this.assertScmId(connectionId);
+    return `slot:scm-webhook/${connectionId}`;
+  }
+
   pathForRef(ref: string) {
-    const match = SLOT_REF.exec(ref);
-    if (!match) throw new ControlPlaneError('invalid_configuration', 'Only provider slot references have local secret paths.', 'credential_ref');
-    this.assertProviderId(match[1]);
-    const path = join(this.root, `${match[1]}.key`);
+    const providerMatch = SLOT_REF.exec(ref);
+    const match = providerMatch ?? SCM_SLOT_REF.exec(ref) ?? SCM_WEBHOOK_SLOT_REF.exec(ref);
+    if (!match) throw new ControlPlaneError('invalid_configuration', 'Only local slot references have local secret paths.', 'credential_ref');
+    if (providerMatch) this.assertProviderId(match[1]);
+    else this.assertScmId(match[1]);
+    const directory = SLOT_REF.test(ref) ? this.root : join(patchpawPaths(this.runtimeHome).secrets, SCM_WEBHOOK_SLOT_REF.test(ref) ? 'scm-webhook' : 'scm');
+    const path = join(directory, `${match[1]}.key`);
     if (basename(path) !== `${match[1]}.key`) throw new ControlPlaneError('invalid_configuration', 'Invalid credential slot path.', 'credential_ref');
     return path;
   }
@@ -193,6 +209,67 @@ export class SecretStore {
     return this.slotRef(providerId);
   }
 
+  private async writeScmSlot(connectionId: string, secret: string, webhook: boolean) {
+    const paths = patchpawPaths(this.runtimeHome);
+    const root = join(paths.secrets, webhook ? 'scm-webhook' : 'scm');
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    let windowsAccount: WindowsAccount | undefined;
+    if (process.platform !== 'win32') { await chmod(paths.secrets, 0o700); await chmod(root, 0o700); }
+    else {
+      try {
+        windowsAccount = await currentWindowsAccount();
+        await protectWindowsPath(paths.secrets, true, windowsAccount);
+        await protectWindowsPath(root, true, windowsAccount);
+      } catch { throw new ControlPlaneError('invalid_configuration', 'Unable to apply safe Windows permissions to SCM credential storage.', 'credential_ref'); }
+    }
+    const ref = webhook ? this.scmWebhookSlotRef(connectionId) : this.scmSlotRef(connectionId);
+    const target = this.pathForRef(ref);
+    const temporary = join(root, `.${connectionId}.${randomUUID()}.tmp`);
+    let backup: string | undefined;
+    let targetPublished = false;
+    try {
+      await writeFile(temporary, secret, { encoding: 'utf8', mode: 0o600 });
+      if (windowsAccount) await protectSecretPath(temporary, false, windowsAccount);
+      else await chmod(temporary, 0o600);
+      if (windowsAccount && await fileExists(target)) {
+        await protectSecretPath(target, false, windowsAccount);
+        backup = join(root, `.${connectionId}.${randomUUID()}.previous`);
+        await rename(target, backup);
+      }
+      await rename(temporary, target);
+      targetPublished = true;
+      if (windowsAccount) await protectSecretPath(target, false, windowsAccount);
+      else await chmod(target, 0o600);
+      if (backup) { await rm(backup, { force: true }); backup = undefined; }
+    } catch (error) {
+      if (windowsAccount) {
+        if (targetPublished) await rm(target, { force: true }).catch(() => undefined);
+        if (backup) await rename(backup, target).catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      if (backup) await rm(backup, { force: true }).catch(() => undefined);
+    }
+    return ref;
+  }
+
+  async writeScmSecret(connectionId: string, secret: string) {
+    this.assertScmId(connectionId);
+    if (typeof secret !== 'string' || secret.length === 0) invalid('Credential cannot be empty.', 'credential');
+    return this.writeScmSlot(connectionId, secret, false);
+  }
+
+  async writeScmWebhookSecret(connectionId: string, secret: string) {
+    this.assertScmId(connectionId);
+    if (typeof secret !== 'string' || secret.length === 0) invalid('Credential cannot be empty.', 'secret');
+    return this.writeScmSlot(connectionId, secret, true);
+  }
+
+  async deleteScmSecret(connectionId: string) { const ref = this.scmSlotRef(connectionId); await rm(this.pathForRef(ref), { force: true }); return ref; }
+
+  async deleteScmWebhookSecret(connectionId: string) { const ref = this.scmWebhookSlotRef(connectionId); await rm(this.pathForRef(ref), { force: true }); return ref; }
+
   async deleteProviderSecret(providerId: string) {
     const ref = this.slotRef(providerId);
     const path = this.pathForRef(ref);
@@ -248,6 +325,10 @@ export class SecretStore {
 
   private assertProviderId(providerId: string) {
     if (!PROVIDER_ID.test(providerId) || providerId.includes('..')) invalid('Invalid provider identifier.', 'provider_id');
+  }
+
+  private assertScmId(connectionId: string) {
+    if (!SCM_ID.test(connectionId) || connectionId.includes('..')) invalid('Invalid SCM connection identifier.', 'connection_id');
   }
 }
 

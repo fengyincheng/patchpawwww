@@ -1,6 +1,6 @@
 import { ControlPlaneDb, isoNow, type ControlPlaneTransaction } from './db.ts';
 import { assertExpectedRevision, ControlPlaneError, isSqliteConstraint, notFound, rethrowConstraint } from './errors.ts';
-import { createId, normalizeRepositoryName, repositoryFromRow } from './common.ts';
+import { createId, normalizeRepositoryName, repositoryFromRow, repositoryStorageKey } from './common.ts';
 import type { ExpectedRevision, Repository, RepositoryInput } from './types.ts';
 
 export async function getRepository(db: ControlPlaneDb, id: string) {
@@ -10,7 +10,12 @@ export async function getRepository(db: ControlPlaneDb, id: string) {
 
 export async function getRepositoryByName(db: ControlPlaneDb, fullName: string) {
   const fullNameNormalized = normalizeRepositoryName(fullName);
-  const result = await db.execute('SELECT * FROM repositories WHERE full_name_normalized = :full_name_normalized', { full_name_normalized: fullNameNormalized });
+  const result = await db.execute("SELECT * FROM repositories WHERE full_name_normalized = :full_name_normalized AND scm_kind = 'github'", { full_name_normalized: fullNameNormalized });
+  return result.rows[0] ? repositoryFromRow(result.rows[0]) : undefined;
+}
+
+export async function getRepositoryByStorageKey(db: ControlPlaneDb, key: string) {
+  const result = await db.execute('SELECT * FROM repositories WHERE storage_key = :storage_key', { storage_key: key });
   return result.rows[0] ? repositoryFromRow(result.rows[0]) : undefined;
 }
 
@@ -26,14 +31,19 @@ export async function listRepositories(db: ControlPlaneDb) {
 }
 
 export async function createRepository(db: ControlPlaneDb, input: RepositoryInput) {
-  const fullNameNormalized = normalizeRepositoryName(input.fullName);
+  const fullNameNormalized = input.scmKind === 'gitlab' ? repositoryStorageKey(input) : normalizeRepositoryName(input.fullName);
+  const storage = input.storageKey ?? repositoryStorageKey(input);
   const now = isoNow();
   const repository: Repository = { id: createId(), fullNameNormalized,
-    displayName: input.displayName?.trim() || input.fullName.trim(), revision: 1, createdAt: now, updatedAt: now };
+    displayName: input.displayName?.trim() || input.fullName.trim(), scmKind: input.scmKind ?? 'github', connectionId: input.connectionId ?? null,
+    remoteProjectId: input.remoteProjectId === null || input.remoteProjectId === undefined ? null : String(input.remoteProjectId), pathWithNamespace: input.pathWithNamespace ?? null,
+    webUrl: input.webUrl ?? null, cloneUrl: input.cloneUrl ?? null, storageKey: storage, revision: 1, createdAt: now, updatedAt: now };
   try {
-    await db.execute(`INSERT INTO repositories(id, full_name_normalized, display_name, revision, created_at, updated_at)
-      VALUES (:id, :full_name_normalized, :display_name, :revision, :created_at, :updated_at)`, {
+    await db.execute(`INSERT INTO repositories(id, full_name_normalized, display_name, scm_kind, connection_id, remote_project_id, path_with_namespace, web_url, clone_url, storage_key, revision, created_at, updated_at)
+      VALUES (:id, :full_name_normalized, :display_name, :scm_kind, :connection_id, :remote_project_id, :path_with_namespace, :web_url, :clone_url, :storage_key, :revision, :created_at, :updated_at)`, {
       id: repository.id, full_name_normalized: repository.fullNameNormalized, display_name: repository.displayName,
+      scm_kind: repository.scmKind, connection_id: repository.connectionId, remote_project_id: repository.remoteProjectId, path_with_namespace: repository.pathWithNamespace,
+      web_url: repository.webUrl, clone_url: repository.cloneUrl, storage_key: repository.storageKey,
       revision: repository.revision, created_at: repository.createdAt, updated_at: repository.updatedAt,
     });
   } catch (error) {

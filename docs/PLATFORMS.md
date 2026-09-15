@@ -14,4 +14,4 @@ Linux/macOS 默认使用运行账号的 `~/.patchpaw`，可通过 `PATCHPAW_HOME
 
 迁移前停止旧服务、worker 和定时任务，确认它们不再使用旧目录，并完成备份。Linux 会检查进程引用；macOS 没有同等通用的引用清单，更依赖操作员确认停机。运行时锁和迁移日志也会参与检查。
 
-目标仓库的 shell、测试工具和依赖仍由操作员准备。平台 CI 通过不保证任意项目的命令可用，命令读写权限也不提供 OS 隔离。部署边界见 [安全模型](SECURITY-MODEL.md)，安装步骤见 [README](../README.md)。
+目标仓库的 shell、测试工具和依赖仍由操作员准备。GitHub 和 GitLab 的 CI 读取都按精确提交 SHA 关联；平台 CI 通过不保证任意项目的命令可用，命令读写权限也不提供 OS 隔离。GitLab 设置见 [GitLab setup](GITLAB.md)，部署边界见 [安全模型](SECURITY-MODEL.md)，安装步骤见 [README](../README.md)。

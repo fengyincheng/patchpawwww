@@ -3,6 +3,7 @@ import type { Trace } from '../harness/trace.ts';
 import { bounded } from '../harness/trace.ts';
 import { captureVerificationInputs, changedVerificationInputs, type VerificationInputs } from './verification-inputs.ts';
 import { hostShell } from '../platform/shell.ts';
+import { workspaceCommandEnvironment } from '../platform/command-environment.ts';
 
 export interface WorkspaceState { path: string; initialHead: string; mainSha: string; unmerged: string[]; mergePending: boolean; verificationInputs?: VerificationInputs }
 // The workspace already exists as a worktree of the shared repo (repo-store.createWorktree)
@@ -30,8 +31,9 @@ async function repairChanges(ws: WorkspaceState, startHead: string, trace: Trace
 export async function validateWorkspace(ws: WorkspaceState, tests: string[], trace: Trace, startHead?: string, signal?: AbortSignal) {
   const validation = [];
   const shell = hostShell();
+  const commandEnv = workspaceCommandEnvironment();
   for (const test of tests) {
-    const result = await command(ws.path, shell.executable, shell.args(test), undefined, undefined, signal);
+    const result = await command(ws.path, shell.executable, shell.args(test), commandEnv, undefined, signal);
     // The validation artifact keeps full command output; the trace event stays bounded.
     const stdout = bounded(result.stdout), stderr = bounded(result.stderr);
     trace.emit('validation', { command: test, exitCode: result.exitCode, timedOut: result.timedOut,

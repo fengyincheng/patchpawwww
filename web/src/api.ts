@@ -10,6 +10,31 @@ export interface Repository {
   revision: number;
   created_at: string;
   updated_at: string;
+  scm_kind?: 'github' | 'gitlab';
+  connection_id?: string | null;
+  remote_project_id?: string | null;
+  path_with_namespace?: string | null;
+  web_url?: string | null;
+  clone_url?: string | null;
+  storage_key?: string;
+}
+
+export interface ScmConnection {
+  id: string;
+  kind: 'github' | 'gitlab';
+  instance_url: string;
+  credential_ref: string | null;
+  credential_configured: boolean;
+  webhook_mode: 'secret' | 'signing';
+  webhook_secret_ref: string | null;
+  webhook_secret_configured: boolean;
+  bot_user_id: string | null;
+  bot_login: string | null;
+  project_ids: string[];
+  enabled: boolean;
+  revision: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface PromptAsset {
@@ -215,9 +240,14 @@ export const adminApi = {
   login: (token: string) => request<Session>('/api/admin/auth/login', json({ token })),
   logout: () => request<Session>('/api/admin/auth/logout', json({})),
   repositories: () => request<Repository[]>('/api/admin/repositories'),
+  scmConnections: () => request<ScmConnection[]>('/api/admin/scm-connections'),
+  createScmConnection: (body: ScmConnectionPayload) => request<ScmConnection>('/api/admin/scm-connections', json(body)),
+  setScmCredential: (connection: ScmConnection, credential: string) => request<ScmConnection>(`/api/admin/scm-connections/${encodeURIComponent(connection.id)}/credential`, { method: 'PUT', body: JSON.stringify({ secret: credential }) }),
+  setScmWebhookSecret: (connection: ScmConnection, secret: string) => request<ScmConnection>(`/api/admin/scm-connections/${encodeURIComponent(connection.id)}/webhook-secret`, { method: 'PUT', body: JSON.stringify({ secret }) }),
+  verifyScmConnection: (connection: ScmConnection) => request<{ status: string; bot?: { id: string; login: string }; projects?: Array<{ id: string; path_with_namespace?: string }> }>(`/api/admin/scm-connections/${encodeURIComponent(connection.id)}/verify`, json({})),
   repository: (repo: string) => request<Repository>(`/api/admin/repositories/${encodedRepo(repo)}`),
   bootstrap: (repo: string, displayName?: string) => request<BootstrapResult>(`/api/admin/repositories/${encodedRepo(repo)}/bootstrap`, json(displayName ? { display_name: displayName } : {})),
-  updateRepository: (repo: Repository, displayName: string) => request<Repository>(`/api/admin/repositories/${encodedRepo(repo.full_name)}`, patch({ display_name: displayName, expected_revision: repo.revision })),
+  updateRepository: (repo: Repository, displayName: string) => request<Repository>(`/api/admin/repositories/${encodedRepo(repo.id)}`, patch({ display_name: displayName, expected_revision: repo.revision })),
   publicPrompts: () => request<PromptAsset[]>('/api/admin/prompts/public'),
   createPublicPrompt: (body: PromptPayload) => request<PromptAsset>('/api/admin/prompts/public', json(body)),
   updatePublicPrompt: (asset: PromptAsset, body: PromptPayload) => request<PromptAsset>(`/api/admin/prompts/public/${asset.id}`, patch({ ...body, expected_revision: asset.revision })),
@@ -258,6 +288,7 @@ export const adminApi = {
 export interface PromptPayload { slug: string; title: string; role?: string | null; content: string; enabled?: boolean }
 export interface SkillPayload { slug: string; title: string; description?: string; content: string; enabled?: boolean }
 export interface ProviderPayload { type: ProviderType; display_name: string; base_url: string; credential_ref?: string | null; request_options?: Record<string, string | number | boolean>; enabled?: boolean }
+export interface ScmConnectionPayload { id?: string; kind: 'gitlab'; instance_url: string; webhook_mode?: 'secret' | 'signing'; bot_user_id?: string | null; bot_login?: string | null; project_ids: string[]; enabled?: boolean }
 export interface ModelPayload { model_identifier: string; display_name?: string; enabled?: boolean }
 export interface CommandPayload {
   slash_name: string;

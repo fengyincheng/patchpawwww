@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { createClient } from '@libsql/client';
 import { pathToFileURL } from 'node:url';
@@ -166,10 +166,27 @@ async function copyDurablePath(source: string, runtimeHome: string, stagingRoot:
   return durableFileRecords(destination, relative(runtimeHome, source));
 }
 
+async function protectSecretTree(path: string): Promise<void> {
+  await chmod(path, 0o700);
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) await protectSecretTree(child);
+    else if (entry.isFile()) await chmod(child, 0o600);
+    else throw new Error(`Unsupported secret entry in backup: ${child}`);
+  }
+}
+
+async function copySecretPath(source: string, runtimeHome: string, stagingRoot: string) {
+  const copied = await copyDurablePath(source, runtimeHome, stagingRoot);
+  if (copied) await protectSecretTree(join(stagingRoot, 'files', portableRelative(runtimeHome, source)));
+  return copied;
+}
+
 /**
- * Create a rollback artifact for a runtime home without including provider
- * secrets. SQLite files are copied through VACUUM INTO so a live WAL database
- * is backed up from a consistent snapshot rather than by copying its main file.
+ * Create a rollback artifact for a runtime home. SCM slots are included so a
+ * restored control plane can reconnect without manual re-entry; provider
+ * secrets remain excluded. SQLite files are copied through VACUUM INTO so a
+ * live WAL database is backed up from a consistent snapshot.
  */
 export async function backupRuntime(options: { runtimeHome: string; destination?: string }): Promise<RuntimeBackupReport> {
   const runtimeHome = resolve(options.runtimeHome);
@@ -191,11 +208,18 @@ export async function backupRuntime(options: { runtimeHome: string; destination?
       for (const source of databaseSources) databases.push(await databaseBackup(source, runtimeHome, stagingRoot));
 
       const durableSources = [paths.state, paths.outbox, paths.runs, paths.snapshots];
+      const scmSecretSources = [join(paths.secrets, 'scm'), join(paths.secrets, 'scm-webhook')];
       const copiedPaths: string[] = [];
       const missingPaths: string[] = [];
       const files: RuntimeBackupFile[] = [];
       for (const source of durableSources) {
         const copied = await copyDurablePath(source, runtimeHome, stagingRoot);
+        const relativePath = portableRelative(runtimeHome, source);
+        if (copied) { copiedPaths.push(relativePath); files.push(...copied); }
+        else missingPaths.push(relativePath);
+      }
+      for (const source of scmSecretSources) {
+        const copied = await copySecretPath(source, runtimeHome, stagingRoot);
         const relativePath = portableRelative(runtimeHome, source);
         if (copied) { copiedPaths.push(relativePath); files.push(...copied); }
         else missingPaths.push(relativePath);
@@ -211,6 +235,9 @@ export async function backupRuntime(options: { runtimeHome: string; destination?
         copied_paths: copiedPaths,
         missing_paths: missingPaths,
         files,
+        // The root label records that unrecognised/provider secret material is
+        // excluded; the two explicit SCM child paths above are included with
+        // their restricted file modes.
         excluded_paths: ['secrets', 'repos', 'workspaces', 'logs', 'cache', 'tmp', 'locks'],
       };
       await writeFile(join(stagingRoot, 'manifest.json'), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });

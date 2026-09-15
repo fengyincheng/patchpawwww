@@ -13,9 +13,11 @@ import { configuredRuntimeHome } from '../config/env.ts';
 import { registerAdminApi } from './admin-api.ts';
 import { withRuntimeLock } from '../migration/runtime-lock.ts';
 import { publicSetupInfo } from './public-setup.ts';
+import { normalizeNoteHook, verifyLegacyToken, verifyStandardSignature } from '../scm/gitlab/webhook.ts';
+import type { ScmInboundReader } from '../scm/types.ts';
 
 export interface ServerConfig {
-  webhookSecret: string;
+  webhookSecret?: string;
   snapshotRoot: string;
   testRepo: string;
   botLogin?: string;
@@ -23,6 +25,17 @@ export interface ServerConfig {
   publicOrigin?: string;
   adminToken?: string;
   bootstrapEnv?: NodeJS.ProcessEnv;
+  gitlabWebhooks?: GitLabWebhookConfig[];
+}
+export interface GitLabWebhookConfig {
+  connectionId: string;
+  projectIds: string[];
+  webhookMode: 'secret' | 'signing';
+  webhookSecret: string;
+  botUserId?: string;
+  botLogin?: string;
+  resolveBotIdentity?: () => Promise<{ id: string; login: string }>;
+  reader?: ScmInboundReader;
 }
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 const frontendDist = fileURLToPath(new URL('../../web/dist', import.meta.url));
@@ -40,7 +53,7 @@ const frontendContentTypes: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
-export function buildServer(config: ServerConfig, github: GitHubReader, logger = false,
+export function buildServer(config: ServerConfig, github: GitHubReader | undefined, logger = false,
   onComment?: (comment: HumanReply) => Promise<void>) {
   const app = Fastify({ logger, bodyLimit: 25 * 1024 * 1024 });
   app.removeContentTypeParser('application/json');
@@ -59,7 +72,7 @@ export function buildServer(config: ServerConfig, github: GitHubReader, logger =
     const event = header('x-github-event');
     const delivery = header('x-github-delivery');
     request.log.info({ event, delivery_id: delivery, status: 'received' });
-    if (!Buffer.isBuffer(request.body) || !verifySignature(request.body, header('x-hub-signature-256'), config.webhookSecret)) {
+    if (!Buffer.isBuffer(request.body) || !verifySignature(request.body, header('x-hub-signature-256'), config.webhookSecret ?? '')) {
       return reply.code(401).send({ status: 'invalid_signature' });
     }
     if (!event || !delivery || !/^[a-zA-Z0-9-]+$/.test(delivery)) {
@@ -100,6 +113,7 @@ export function buildServer(config: ServerConfig, github: GitHubReader, logger =
       request.log.info({ event, delivery_id: delivery, status: 'ignored', reason: 'outside_phase_1_repo' });
       return { status: 'ignored', reason: 'outside_phase_1_repo', delivery_id: delivery };
     }
+    if (!github) return reply.code(503).send({ status: 'github_not_configured', delivery_id: delivery });
     return withRuntimeLock(config.root ?? config.snapshotRoot, 'shared', false, async () => {
       let saved;
       try {
@@ -122,10 +136,47 @@ export function buildServer(config: ServerConfig, github: GitHubReader, logger =
     });
   });
 
+  app.post<{ Params: { connectionId: string }; Body: Buffer }>('/gitlab/webhook/:connectionId', async (request, reply) => {
+    const endpoint = config.gitlabWebhooks?.find(value => value.connectionId === request.params.connectionId);
+    if (!endpoint || !Buffer.isBuffer(request.body)) return reply.code(404).send({ status: 'not_found' });
+    const header = (name: string) => typeof request.headers[name] === 'string' ? request.headers[name] as string : undefined;
+    const valid = endpoint.webhookMode === 'signing'
+      ? verifyStandardSignature({ body: request.body, signature: header('webhook-signature'), webhookId: header('webhook-id') ?? header('x-gitlab-webhook-uuid'), timestamp: header('webhook-timestamp'), secret: endpoint.webhookSecret })
+      : verifyLegacyToken(header('x-gitlab-token'), endpoint.webhookSecret);
+    if (!valid) return reply.code(401).send({ status: 'invalid_signature' });
+    let payload: unknown;
+    try { payload = JSON.parse(request.body.toString('utf8')); } catch { return reply.code(400).send({ status: 'invalid_json' }); }
+    const noteId = (payload as any)?.object_attributes?.id;
+    const delivery = header('webhook-id') ?? header('idempotency-key') ?? header('x-gitlab-webhook-uuid') ?? `gitlab:${endpoint.connectionId}:${(payload as any)?.project?.id ?? 'unknown'}:${(payload as any)?.merge_request?.iid ?? 'unknown'}:${noteId ?? 'unknown'}:create`;
+    let botUserId = endpoint.botUserId;
+    let botLogin = endpoint.botLogin;
+    if (!botUserId || !botLogin) {
+      if (!endpoint.resolveBotIdentity) return reply.code(503).send({ status: 'bot_identity_unavailable' });
+      try { const identity = await endpoint.resolveBotIdentity(); botUserId = identity.id; botLogin = identity.login; }
+      catch { return reply.code(503).send({ status: 'bot_identity_unavailable' }); }
+    }
+    const normalized = normalizeNoteHook(payload, endpoint.connectionId, delivery, botUserId, botLogin);
+    if (!normalized) return { status: 'ignored', event: 'note' };
+    if (!endpoint.projectIds.includes(normalized.projectId) && !endpoint.projectIds.includes(normalized.repositoryPath)) return { status: 'ignored', reason: 'unregistered_project' };
+    if (!onComment) return { status: 'accepted', delivery_id: delivery, comment_id: normalized.remoteId };
+    const comment: HumanReply = { repo: normalized.storageKey, pr_number: normalized.changeRequestNumber, comment_id: normalized.remoteId,
+      author: normalized.authorLogin, author_id: normalized.authorId, body: normalized.body, url: normalized.url, created_at: normalized.createdAt,
+      source_event_id: normalized.sourceEventId, platform: 'gitlab', connection_id: normalized.connectionId, project_id: normalized.projectId, repository_path: normalized.repositoryPath };
+    try {
+      const stored = await withRuntimeLock(config.root ?? config.snapshotRoot, 'shared', false,
+        () => persistInboundComment(config.root ?? config.snapshotRoot, delivery, comment));
+      return reply.code(202).send({ status: 'verification_pending', delivery_id: delivery, comment_id: comment.comment_id,
+        duplicate: stored.record.status !== 'pending_verification' });
+    } catch (error) {
+      request.log.error({ event: 'note', delivery_id: delivery, status: 'comment_processing_failed', http_status: (error as { status?: number }).status ?? null });
+      return reply.code(502).send({ status: 'processing_failed', delivery_id: delivery });
+    }
+  });
+
   const serveFrontend = async (request: { url: string }, reply: FastifyReply) => {
     if (!existsSync(frontendDist)) return reply.code(503).send({ status: 'frontend_not_built' });
     const pathname = new URL(request.url, 'http://patchpaw.local').pathname;
-    if (pathname === '/api/admin' || pathname.startsWith('/api/') || pathname === '/health' || pathname === '/github' || pathname.startsWith('/github/')) {
+    if (pathname === '/api/admin' || pathname.startsWith('/api/') || pathname === '/health' || pathname === '/github' || pathname.startsWith('/github/') || pathname === '/gitlab' || pathname.startsWith('/gitlab/')) {
       return reply.code(404).send({ status: 'not_found' });
     }
     const relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');

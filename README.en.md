@@ -1,8 +1,8 @@
 # PatchPaw
 
-A self-hosted GitHub App for PR conversations, code reviews, CI repair and conflict analysis, with a web console for repositories, models, prompts, skills and commands.
+A self-hosted GitHub App / GitLab integration for Pull Request and Merge Request conversations, code reviews, CI reads and conflict analysis, with a web console for repositories, models, prompts, skills, commands and SCM connections.
 
-[中文](README.md) · [Operations](docs/OPERATIONS.md) · [Security model](docs/SECURITY-MODEL.md) · [Contributing](CONTRIBUTING.md)
+[中文](README.md) · [GitLab setup](docs/GITLAB.md) · [Operations](docs/OPERATIONS.md) · [Security model](docs/SECURITY-MODEL.md) · [Contributing](CONTRIBUTING.md)
 
 This is an early release for operators comfortable maintaining their own deployment. Linux and macOS are supported; Linux is recommended for production. **Native Windows is not currently supported. No official Docker image is available. A Linux container image usable through Docker on Windows may be considered in the future; there is no release date.**
 
@@ -13,6 +13,7 @@ Quick navigation: [Setup](#prerequisites) · [Commands](#everyday-commands) · [
 - A persistent Linux host or macOS, Node.js **22.x, version 22.22.0 or newer**, npm and Git.
 - A domain or subdomain you control, with DNS and an HTTPS reverse proxy.
 - Permission to register a GitHub App and install it on your target repositories.
+- Or a GitLab Personal/Project Access Token with access to the target projects. GitLab.com and self-managed instances are supported; see [GitLab setup](docs/GITLAB.md).
 - A model API credential. Supported provider types: Zhipu/Z.ai, DeepSeek, OpenRouter, Kimi and Qwen. Check model availability, endpoints, costs and data policies yourself.
 - The target repository's toolchain, such as Python, compilers or package managers. PatchPaw does not provision every project's dependencies.
 
@@ -84,6 +85,8 @@ For installation scope, select **Only on this account** for personal use, or **A
 An initial ping may fail before the server is running. Check deliveries after deployment. References: [registration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app), [permissions](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app), [PR comment endpoint permissions](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
 
 ## 3. Install and configure
+
+For a GitLab-only deployment, skip the GitHub App registration section and follow [GitLab setup](docs/GITLAB.md) for `PATCHPAW_GITLAB_CONNECTIONS`. GitHub and GitLab connections can run in the same process.
 
 Run as the account that will run the service:
 
@@ -306,10 +309,12 @@ The default is `~/.patchpaw/`, overridable with `PATCHPAW_HOME`. Directories are
 │   ├── state/owner__repo/  # PR state, pause/close records and proposals
 │   └── outbox/             # File-based outbound support data
 ├── secrets/providers/      # Server-side model credentials
+├── secrets/scm/            # GitLab API/Git HTTPS token slots
+├── secrets/scm-webhook/    # GitLab webhook secret slots
 ├── repos/<encoded-repo>.git/ # One shared bare object store per repository
 ├── workspaces/<run-id>/     # Linked Git worktrees
 ├── runs/<run-id>/           # Traces, artifacts, validation and configuration snapshots
-├── snapshots/              # GitHub event snapshots
+├── snapshots/              # GitHub/GitLab event snapshots
 ├── logs/                   # Service logs
 ├── locks/                  # Runtime/repository coordination
 ├── backups/                # Backups

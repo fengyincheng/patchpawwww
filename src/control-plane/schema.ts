@@ -1,7 +1,7 @@
 import type { Client } from '@libsql/client';
 
-export const CONTROL_PLANE_SCHEMA_VERSION = '2';
-export const CONTROL_PLANE_MIGRATION_VERSION = 2;
+export const CONTROL_PLANE_SCHEMA_VERSION = '3';
+export const CONTROL_PLANE_MIGRATION_VERSION = 3;
 
 /**
  * The control plane has its own schema and lifecycle. It deliberately does not
@@ -23,10 +23,36 @@ CREATE TABLE IF NOT EXISTS repositories (
   id TEXT PRIMARY KEY,
   full_name_normalized TEXT NOT NULL UNIQUE COLLATE NOCASE,
   display_name TEXT NOT NULL,
+  scm_kind TEXT NOT NULL DEFAULT 'github' CHECK (scm_kind IN ('github', 'gitlab')),
+  connection_id TEXT,
+  remote_project_id TEXT,
+  path_with_namespace TEXT,
+  web_url TEXT,
+  clone_url TEXT,
+  storage_key TEXT NOT NULL DEFAULT '',
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scm_connections (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('github', 'gitlab')),
+  instance_url TEXT NOT NULL,
+  credential_ref TEXT,
+  webhook_mode TEXT NOT NULL DEFAULT 'secret' CHECK (webhook_mode IN ('secret', 'signing')),
+  webhook_secret_ref TEXT,
+  bot_user_id TEXT,
+  bot_login TEXT,
+  project_ids_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scm_connections_instance ON scm_connections(kind, instance_url, id);
+CREATE UNIQUE INDEX IF NOT EXISTS repositories_connection_remote ON repositories(connection_id, remote_project_id)
+  WHERE connection_id IS NOT NULL AND remote_project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS repositories_storage_key ON repositories(storage_key);
 
 CREATE TABLE IF NOT EXISTS prompt_assets (
   id TEXT PRIMARY KEY,
@@ -236,6 +262,39 @@ DROP TABLE command_skills_v1;
 DROP TABLE commands_v1;
 `;
 
+const SCM_MIGRATION = `
+UPDATE repositories SET storage_key = full_name_normalized WHERE storage_key = '';
+CREATE TABLE IF NOT EXISTS scm_connections (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('github', 'gitlab')),
+  instance_url TEXT NOT NULL,
+  credential_ref TEXT,
+  webhook_mode TEXT NOT NULL DEFAULT 'secret' CHECK (webhook_mode IN ('secret', 'signing')),
+  webhook_secret_ref TEXT,
+  bot_user_id TEXT,
+  bot_login TEXT,
+  project_ids_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scm_connections_instance ON scm_connections(kind, instance_url, id);
+CREATE UNIQUE INDEX IF NOT EXISTS repositories_connection_remote ON repositories(connection_id, remote_project_id)
+  WHERE connection_id IS NOT NULL AND remote_project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS repositories_storage_key ON repositories(storage_key);
+`;
+
+const SCM_REPOSITORY_COLUMNS: Record<string, string> = {
+  scm_kind: "TEXT NOT NULL DEFAULT 'github'",
+  connection_id: 'TEXT',
+  remote_project_id: 'TEXT',
+  path_with_namespace: 'TEXT',
+  web_url: 'TEXT',
+  clone_url: 'TEXT',
+  storage_key: "TEXT NOT NULL DEFAULT ''",
+};
+
 export async function ensureControlPlaneSchema(client: Client) {
   await client.execute('PRAGMA foreign_keys=ON');
   await client.execute(`CREATE TABLE IF NOT EXISTS control_plane_meta (
@@ -252,9 +311,17 @@ export async function ensureControlPlaneSchema(client: Client) {
     throw new Error(`Unsupported control-plane migration version: ${current}`);
   }
   if (current < CONTROL_PLANE_MIGRATION_VERSION) {
+    const repositoryInfo = await client.execute('PRAGMA table_info(repositories)');
+    const repositoryColumns = new Set(repositoryInfo.rows.map(row => String(row.name)));
     const transaction = await client.transaction('write');
     try {
       if (current === 1) await transaction.executeMultiple(CUSTOM_COMMAND_MIGRATION);
+      if (current === 1 || current === 2) {
+        for (const [column, definition] of Object.entries(SCM_REPOSITORY_COLUMNS)) {
+          if (!repositoryColumns.has(column)) await transaction.execute(`ALTER TABLE repositories ADD COLUMN ${column} ${definition}`);
+        }
+        await transaction.executeMultiple(SCM_MIGRATION);
+      }
       await transaction.executeMultiple(CONTROL_PLANE_SCHEMA);
       await transaction.execute({ sql: `INSERT INTO control_plane_migrations(version, applied_at) VALUES (:version, :applied_at)
         ON CONFLICT(version) DO NOTHING`, args: { version: CONTROL_PLANE_MIGRATION_VERSION, applied_at: new Date().toISOString() } });

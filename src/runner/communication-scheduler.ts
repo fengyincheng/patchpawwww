@@ -20,6 +20,7 @@ import { readConflictApproval, updateConflictApproval } from './conflict-approva
 import { readPaused, savePaused } from './resume.ts';
 import { workspaceEvidenceSha256, type ConflictWorkspaceEvidence } from './workspace-evidence.ts';
 import { withRuntimeLock } from '../migration/runtime-lock.ts';
+import type { ScmInboundReader } from '../scm/types.ts';
 
 export interface SchedulerConfig {
   root: string;
@@ -37,6 +38,10 @@ export interface SchedulerConfig {
   schedulerHooks?: {
     afterDeadlineRead?: (deadline: string | undefined) => Promise<void> | void;
   };
+  /** Platform-specific inbound verification, used by GitLab records while GitHub keeps its legacy reader. */
+  inboundScmReader?: ScmInboundReader | ((connectionId: string) => ScmInboundReader | undefined);
+  /** Platform-aware outbox connection resolver. GitHub remains the default resolver. */
+  connectionFor?: (item: OutboundItem) => Promise<OutboundConnection>;
 }
 
 export interface CommunicationSchedulerService {
@@ -217,6 +222,7 @@ async function finalizeDelayedDeliveryOwned(config: SchedulerConfig, stored: Sto
       const [owner, repo] = item.repo.split('/');
       const resolved = await resolveConnection();
       if (!resolved) throw new Error('GitHub connection required for stale Review finalization');
+      if (!resolved.client) throw new Error('GitHub client required for stale Review finalization');
       const { data } = await resolved.client.rest.pulls.get({ owner, repo, pull_number: item.pr_number });
       actualHead = data.head.sha; prState = data.state;
     } catch { /* cancellation remains durable if the read is unavailable */ }
@@ -367,6 +373,7 @@ async function finalizeDelayedDeliveryOwned(config: SchedulerConfig, stored: Sto
     if (journal?.status === 'closing') {
       const resolved = await resolveConnection();
       if (!resolved) throw new Error('GitHub connection required for close finalization');
+      if (!resolved.client) throw new Error('GitHub client required for close finalization');
       await resumePendingClose(config, item.repo, item.pr_number, path, resolved.client, resolved.botLogin);
     }
   }
@@ -391,7 +398,7 @@ type GitHubRuntime = ReturnType<typeof createGitHub> & GitHubReader;
 
 export function startCommunicationScheduler(config: SchedulerConfig, githubOverride?: GitHubRuntime | GitHubReader,
   onVerified: (reply: InboundRecord['reply']) => Promise<void> = async () => {}): CommunicationSchedulerService {
-  const github = (githubOverride ?? createGitHub(config)) as GitHubRuntime;
+  const github = (githubOverride ?? (config.appId && config.privateKey ? createGitHub(config) : undefined)) as GitHubRuntime | undefined;
   let store: CommunicationStore | undefined;
   let stopped = false;
   let running = false;
@@ -408,20 +415,23 @@ export function startCommunicationScheduler(config: SchedulerConfig, githubOverr
 
   const appLogin = async () => {
     if (botLogin) return botLogin;
+    if (!github) throw new Error('GitHub App bot identity is unavailable');
     const { data } = await github.app.rest.apps.getAuthenticated();
     if (!data?.slug) throw new Error('GitHub App has no bot identity');
     botLogin = `${data.slug}[bot]`;
     return botLogin;
   };
   const connectionFor = async (item: OutboundItem): Promise<OutboundConnection> => {
+    if (config.connectionFor) return config.connectionFor(item);
+    if (!github) throw new Error('No SCM connection is configured for this delivery');
     const [owner, repo] = item.repo.split('/');
     const { data: installation } = await github.app.rest.apps.getRepoInstallation({ owner, repo });
     return { client: github.installation(installation.id), botLogin: await appLogin() };
   };
 
   const processInbound = async () => {
-    if (!store || !github.readPullRequest) return;
-    for (const stored of await store.listDueInbound(new Date().toISOString(), 25)) await verifyInboundNow(config.root, stored, github, onVerified);
+    if (!store || (!github?.readPullRequest && !config.inboundScmReader)) return;
+    for (const stored of await store.listDueInbound(new Date().toISOString(), 25)) await verifyInboundNow(config.root, stored, github, onVerified, config.inboundScmReader);
   };
 
   const processFinalizations = async () => {

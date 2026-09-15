@@ -1,4 +1,5 @@
 import type { ControlPlaneDb } from './db.ts';
+import type { ScmKind } from '../scm/types.ts';
 
 export const PROVIDER_TYPES = ['zhipu', 'deepseek', 'openrouter', 'kimi', 'qwen'] as const;
 export type ProviderType = typeof PROVIDER_TYPES[number];
@@ -15,6 +16,13 @@ export interface Repository {
   id: string;
   fullNameNormalized: string;
   displayName: string;
+  scmKind: ScmKind;
+  connectionId: string | null;
+  remoteProjectId: string | null;
+  pathWithNamespace: string | null;
+  webUrl: string | null;
+  cloneUrl: string | null;
+  storageKey: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -137,7 +145,29 @@ export interface BootstrapMarker {
 export interface RepositoryInput {
   fullName: string;
   displayName?: string;
+  scmKind?: ScmKind;
+  connectionId?: string | null;
+  remoteProjectId?: string | number | null;
+  pathWithNamespace?: string | null;
+  webUrl?: string | null;
+  cloneUrl?: string | null;
+  storageKey?: string;
 }
+
+export interface ScmConnectionInput {
+  id?: string;
+  kind: ScmKind;
+  instanceUrl: string;
+  credentialRef?: string | null;
+  webhookMode?: 'secret' | 'signing';
+  webhookSecretRef?: string | null;
+  botUserId?: string | null;
+  botLogin?: string | null;
+  projectIds?: string[];
+  enabled?: boolean;
+}
+
+export type { ScmConnection } from '../scm/types.ts';
 
 export interface PromptInput {
   scope: AssetScope;
@@ -206,10 +236,7 @@ export interface CopyOptions {
   expectedRepositoryRevision?: number;
 }
 
-export interface BootstrapRepositoryInput {
-  fullName: string;
-  displayName?: string;
-}
+export interface BootstrapRepositoryInput extends RepositoryInput {}
 
 export interface BootstrapOptions {
   root: string;

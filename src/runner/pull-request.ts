@@ -57,6 +57,7 @@ import {
   readUnfinishedConflictApproval, saveConflictApproval, updateConflictApproval, type ConflictApprovalRecord,
 } from './conflict-approval.ts';
 import type { ConflictApprovalRejectionCode } from './conflict-approval.ts';
+import { runGitLabMergeRequest } from '../scm/gitlab/runner.ts';
 
 const APPROVAL_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
@@ -272,7 +273,8 @@ async function prepareConflictApproval(input: {
   }
 }
 
-export async function runPullRequest(config: { appId: number; privateKey: string; snapshotRoot: string; root: string; operatorLogin?: string; appSlug?: string; botLogin?: string; controlPlaneDb?: ControlPlaneDb }, repo: string, number: number) {
+export async function runPullRequest(config: { appId: number; privateKey: string; snapshotRoot: string; root: string; operatorLogin?: string; appSlug?: string; botLogin?: string; controlPlaneDb?: ControlPlaneDb; gitlabConnections?: Array<{ id: string; instanceUrl: string; projectIds: string[]; token?: string; botUserId?: string; botLogin?: string }> }, repo: string, number: number) {
+  if (repo.startsWith('gitlab:')) return runGitLabMergeRequest(config, repo, number);
   const path = statePath(patchpawPaths(config.root).state, repo, number);
   if (workerStatus(await readState(path)) === 'running') return { status: 'already_running' };
   if (!await hasRunnableWork(config.root, repo, number)) return { status: 'mention_required' };

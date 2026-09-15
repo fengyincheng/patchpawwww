@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { tryAcquireFileLock } from '../platform/lock.ts';
 import { isProcessAlive } from '../platform/process.ts';
+import { safeStorageDirectory } from '../scm/identity.ts';
 
 export interface RunState {
   repo: string; pr_number: number; run_id: string; current_head_sha: string;
@@ -35,7 +36,10 @@ export interface RunState {
     publication_delivery_id?: string; publication_remote_id?: number; publication_remote_url?: string; published_at?: string;
   };
 }
-export function statePath(root: string, repo: string, number: number) { return join(root, repo.replace('/', '__'), `pr-${number}.json`); }
+export function statePath(root: string, repo: string, number: number) {
+  const directory = repo.startsWith('gitlab:') ? safeStorageDirectory(repo) : repo.replace('/', '__');
+  return join(root, directory, `pr-${number}.json`);
+}
 export async function readState(path: string): Promise<RunState | null> {
   try { return JSON.parse(await readFile(path, 'utf8')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }

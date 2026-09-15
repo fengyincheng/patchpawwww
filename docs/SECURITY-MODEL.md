@@ -2,13 +2,13 @@
 
 ## 信任边界
 
-PatchPaw 信任操作员提供的环境配置、GitHub App 安装范围、Provider 端点和目标仓库列表。GitHub webhook payload、PR 内容、评论和模型输出应视为外部输入。服务通过签名校验、同源写入保护、HttpOnly session、不可变执行快照和显式命令权限降低风险，但这些措施不等同于 OS 级沙箱。
+PatchPaw 信任操作员提供的环境配置、GitHub App/GitLab connection 授权范围、Provider 端点和目标仓库列表。GitHub/GitLab webhook payload、PR/MR 内容、评论和模型输出应视为外部输入。服务通过签名校验、项目白名单、成员级别检查、同源写入保护、HttpOnly session、不可变执行快照和显式命令权限降低风险，但这些措施不等同于 OS 级沙箱。
 
-模型生成的命令可能读取、修改或删除工作区文件。读写修复可能创建提交、推送分支和发表评论。请在专用账号、容器或虚拟机中运行不信任的仓库，并限制 GitHub App 权限到最小范围。
+模型生成的命令可能读取、修改或删除工作区文件。读写修复可能创建提交、推送分支和发表评论。请在专用账号、容器或虚拟机中运行不信任的仓库，并把 GitHub App 权限、GitLab token scope 和项目白名单限制到最小范围。GitLab fork MR 当前保留只读边界。
 
 ## 秘密处理
 
-Admin token、Provider credentials、Webhook secret、GitHub App private key 和安装 token 只应存在于服务端配置或内存中的必要生命周期。`GET /api/setup`、登录/session 响应和前端 build 不提供 token；日志、截图和 issue 也不应包含这些值。
+Admin token、Provider credentials、Webhook secret、GitHub App private key、GitHub installation token 和 GitLab PAT/project token 只应存在于服务端配置、受保护运行 slot 或内存中的必要生命周期。GitLab token 不会写入 clone URL、命令参数或 trace；`GET /api/setup`、登录/session 响应、SCM 管理 DTO 和前端 build 不提供秘密值；日志、截图和 issue 也不应包含这些值。
 
 ## 不在承诺内的内容
 

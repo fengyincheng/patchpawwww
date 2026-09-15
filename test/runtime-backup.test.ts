@@ -10,13 +10,15 @@ import { backupRuntime } from '../src/migration/backup.ts';
 import { withRuntimeLock } from '../src/migration/runtime-lock.ts';
 import { patchpawPaths } from '../src/config/paths.ts';
 
-test('runtime backup uses consistent SQLite snapshots, records missing control plane, and excludes secrets', async () => {
+test('runtime backup uses consistent SQLite snapshots, excludes provider secrets, and includes SCM slots', async () => {
   const root = await mkdtemp(join(tmpdir(), 'patchpaw-runtime-backup-'));
   const paths = patchpawPaths(root);
   const communication = await openCommunicationStore(root);
   await communication.close();
   await mkdir(paths.secrets, { recursive: true });
   await writeFile(join(paths.secrets, 'provider.key'), 'must-not-be-backed-up\n', { mode: 0o600 });
+  await mkdir(join(paths.secrets, 'scm'), { recursive: true });
+  await writeFile(join(paths.secrets, 'scm', 'gitlab-one.key'), 'gitlab-token\n', { mode: 0o600 });
   await mkdir(join(paths.state, 'owner__repo'), { recursive: true });
   await writeFile(join(paths.state, 'owner__repo', 'pr-7.json'), JSON.stringify({ active: false, phase: 'closed' }));
   await mkdir(join(paths.runs, 'run-1'), { recursive: true });
@@ -37,6 +39,7 @@ test('runtime backup uses consistent SQLite snapshots, records missing control p
   assert.equal(await stat(join(first.backup_path, 'files', 'data', 'state', 'owner__repo', 'pr-7.json')).then(() => true), true);
   assert.equal(await stat(join(first.backup_path, 'secrets')).then(() => true, () => false), false);
   assert.equal((await readFile(join(first.backup_path, 'manifest.json'), 'utf8')).includes('must-not-be-backed-up'), false);
+  assert.equal(await readFile(join(first.backup_path, 'files', 'secrets', 'scm', 'gitlab-one.key'), 'utf8'), 'gitlab-token\n');
 
   const controlPlane = await openControlPlaneDb(root);
   closeControlPlaneDb(controlPlane);

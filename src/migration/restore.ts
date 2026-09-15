@@ -7,7 +7,7 @@ import { patchpawPaths } from '../config/paths.ts';
 import { withRuntimeLock } from './runtime-lock.ts';
 import { RUNTIME_BACKUP_SCHEMA_VERSION, type RuntimeBackupDatabase, type RuntimeBackupFile, type RuntimeBackupReport } from './backup.ts';
 
-const durablePaths = ['data/state', 'data/outbox', 'runs', 'snapshots'] as const;
+const durablePaths = ['data/state', 'data/outbox', 'runs', 'snapshots', 'secrets/scm', 'secrets/scm-webhook'] as const;
 
 export interface RuntimeRestoreReport {
   schema_version: typeof RUNTIME_BACKUP_SCHEMA_VERSION;
@@ -113,6 +113,16 @@ async function durableFileRecords(root: string, relativeRoot: string): Promise<R
   return records;
 }
 
+async function protectSecretTree(path: string): Promise<void> {
+  await chmod(path, 0o700);
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) await protectSecretTree(child);
+    else if (entry.isFile()) await chmod(child, 0o600);
+    else throw new Error(`Unsupported secret entry in restore: ${child}`);
+  }
+}
+
 async function verifyDurableFiles(backupRoot: string, copied: Set<string>, files: RuntimeBackupFile[]) {
   const expected = new Map<string, RuntimeBackupFile>();
   for (const file of files) {
@@ -164,7 +174,7 @@ async function stageCopy(source: string, stagingRoot: string, relativeTarget: st
   return staged;
 }
 
-/** Restore only the state/DB evidence in a verified backup; secrets and Git stores are never touched. */
+/** Restore durable state, control-plane data, and the explicitly included SCM secret slots. */
 export async function restoreRuntime(options: { runtimeHome: string; backupPath: string }): Promise<RuntimeRestoreReport> {
   const runtimeHome = resolve(options.runtimeHome);
   const backupPath = resolve(options.backupPath);
@@ -273,7 +283,8 @@ export async function restoreRuntime(options: { runtimeHome: string; backupPath:
           await mkdir(dirname(target), { recursive: true, mode: 0o700 });
           await rename(staged, target);
           installed.push(target);
-          await chmod(target, 0o700);
+          if (path.startsWith('secrets/')) await protectSecretTree(target);
+          else await chmod(target, 0o700);
         }
       }
       await writeFile(join(archiveRoot, 'manifest.json'), `${JSON.stringify({ schema_version: 'patchpaw.runtime-restore.v1', backup_path: backupPath }, null, 2)}\n`, { mode: 0o600 });
