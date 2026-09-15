@@ -19,7 +19,7 @@ import { runConversation } from '../../tasks/conversation/agent.ts';
 import { runReview } from '../../tasks/review/agent.ts';
 import { runCustom } from '../../tasks/custom/agent.ts';
 import { ensureRepo, fetchPRState, createWorktree, disposeWorkspacePath, isManagedWorktree, runWorkspacePath } from '../../workspace/repo-store.ts';
-import { commitRepair, prepareWorkspace } from '../../workspace/manager.ts';
+import { commitRepair, prepareWorkspace, workspaceChangesSince } from '../../workspace/manager.ts';
 import { gitAuth } from '../../workspace/git.ts';
 import { excerpt } from '../../harness/context/policy.ts';
 import { enqueueCommentDelivery, enqueueReviewDelivery, deliverImmediately, finalizeDelivery } from '../../runner/outbound.ts';
@@ -84,6 +84,10 @@ function fakePullRequest(snapshot: Awaited<ReturnType<GitLabAdapter['readChangeR
 }
 
 function runDir(config: GitLabWorkerConfig, runId: string) { return join(patchpawPaths(config.root).runs, runId); }
+
+function sameProjectMergeRequest(snapshot: { source: { projectId: string }; target: { projectId: string }; repository: { remoteProjectId: string } }) {
+  return snapshot.source.projectId === snapshot.target.projectId && snapshot.source.projectId === snapshot.repository.remoteProjectId;
+}
 
 /** GitLab-only worker entry. It reuses the existing Harness/workspace lifecycle for read-only tasks. */
 export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: string, number: number) {
@@ -180,6 +184,10 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
     const intent = eventComment ? await parsePRIntent(controlPlane, repository.id, eventComment.body, botLogin)
       : approvalRecovery ? { kind: 'control', control: 'approval' } as const : { kind: 'conversation', repositoryId: repository.id } as const;
     const task: PRTask = intent.kind === 'command' ? intent.executionType : intent.kind === 'control' ? intent.control === 'stop' ? 'stop' : intent.control === 'close' ? 'close' : 'conflict' : 'conversation';
+    const customReadWrite = task === 'custom' && intent.kind === 'command' && intent.permission === 'read_write';
+    if (customReadWrite && !sameProjectMergeRequest(snapshot)) {
+      return await finish('needs_human', { reason: 'GitLab fork MR custom read/write is read-only; no cross-project push is attempted.' });
+    }
     if (task === 'stop') return await finish('stopped', { reason: 'GitLab /stop 只停止本地 generation。' });
     if (task === 'close') {
       if (!eventComment) return await finish('needs_human', { reason: 'GitLab /close 缺少可验证的来源评论；没有执行清理。' });
@@ -303,9 +311,9 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
     const seed = async () => ({ ...await seedContext(fake, workspace!, trace, currentBase), repository: snapshot.repository.pathWithNamespace, scm: 'gitlab', scm_connection_id: resolved.connection.id, project_id: resolved.projectId, human_feedback: feedback, execution_id: runtime.snapshot.execution_id });
     state.phase = task; await writeState(path, state);
     const mentions = [snapshot.author.login, config.operatorLogin].filter((value): value is string => !!value);
-    const publishComment = async (purpose: string, semanticKey: string, body: string) => {
+    const publishComment = async (purpose: string, semanticKey: string, body: string, sourceExtra: Record<string, string | number | null | undefined> = {}) => {
       const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose, semanticKey, body, mentions, botLogin,
-        source: { run_id: runId, connection_id: resolved.connection.id, project_id: resolved.projectId, head_sha: snapshot.source.sha } });
+        source: { run_id: runId, connection_id: resolved.connection.id, project_id: resolved.projectId, head_sha: snapshot.source.sha, ...sourceExtra } });
       return deliverImmediately(config.root, stored, { adapter: resolved.adapter, botLogin });
     };
     const finishPublication = async (attempt: Awaited<ReturnType<typeof deliverImmediately>>, completedStatus: string, extra: Record<string, unknown> = {}) => {
@@ -374,15 +382,18 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
     });
     stopWatcher = watcher;
     const taskOptions = { task, prompt: '', ws: workspace, trace, runId, currentBase, execution: runtime,
+      preventGitPush: customReadWrite,
       stopSignal: watcher.signal, stopRequest: watcher.request, prMemory: { root: patchpawPaths(config.root).memory, repo, number } } as any;
     await watcher.guard();
     const pushSameProjectCandidate = async (kind: string, startHead: string) => {
-      if (snapshot.source.projectId !== snapshot.target.projectId || snapshot.source.projectId !== snapshot.repository.remoteProjectId) {
+      if (!sameProjectMergeRequest(snapshot)) {
         throw new Error('GitLab fork MR repair is read-only; PatchPaw will not push to a different source project');
       }
       const before = await resolved.adapter.readChangeRequest(resolved.projectId, number);
       const beforeBranch = await resolved.adapter.client.branch(resolved.projectId, before.target.ref);
       if (before.source.sha !== startHead || String(beforeBranch.data.commit?.id ?? beforeBranch.data.commit?.sha ?? '') !== currentBase.sha) throw new Error('GitLab MR head or target branch changed before push');
+      const ancestry = await git(workspace!.path, ['merge-base', '--is-ancestor', startHead, 'HEAD'], trace, undefined, true);
+      if (ancestry.exitCode !== 0) throw new Error('GitLab candidate history is not a fast-forward descendant of the MR head');
       const sha = await commitRepair(workspace!, kind, trace, startHead);
       state.current_head_sha = sha; state.last_patchpaw_commit = sha; await writeState(path, state); state.phase = 'publishing'; await writeState(path, state);
       await git(workspace!.path, ['push', 'origin', `HEAD:refs/heads/${snapshot.source.ref}`], trace,
@@ -434,9 +445,25 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
       return await finishPublication(publication, 'review_completed', { review });
     }
     if (task === 'custom') {
-      if (intent.kind === 'command' && intent.permission !== 'read_only') return await finish('needs_human', { reason: 'GitLab custom commands with read_write permission require the controlled repair path.' });
-      const answer = await runCustom(taskOptions, await seed()); const publication = await publishComment('custom_completed', `run:${runId}:custom`, answer);
-      return await finishPublication(publication, 'custom_completed', { answer });
+      const answer = await runCustom(taskOptions, await seed());
+      let pushedSha: string | undefined;
+      let writeback: 'pushed' | 'no_changes' | undefined;
+      if (customReadWrite) {
+        const candidate = await workspaceChangesSince(workspace!, snapshot.source.sha, trace);
+        if (candidate.has_changes) {
+          pushedSha = await pushSameProjectCandidate('custom', snapshot.source.sha);
+          writeback = 'pushed';
+        } else {
+          writeback = 'no_changes';
+        }
+      }
+      const body = pushedSha
+        ? `${answer}\n\n---\nPatchPaw writeback:\n- Source branch: \`${snapshot.source.ref}\`\n- Commit: \`${pushedSha}\`\n- Remote MR head confirmed: yes`
+        : answer;
+      const semanticKey = pushedSha ? `run:${runId}:custom:${pushedSha}` : `run:${runId}:custom`;
+      const publication = await publishComment('custom_completed', semanticKey, body,
+        pushedSha ? { commit_sha: pushedSha } : { writeback: 'no_changes' });
+      return await finishPublication(publication, 'custom_completed', { answer, ...(pushedSha ? { commit_sha: pushedSha } : {}), ...(writeback ? { writeback } : {}) });
     }
     if (task === 'ci') {
       let ci = await resolved.adapter.readCI(resolved.projectId, number, state.current_head_sha);
@@ -461,7 +488,7 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
       return await finishPublication(publication, 'ci_completed', { ci });
     }
     if (task === 'repair') {
-      if (snapshot.source.projectId !== snapshot.target.projectId || snapshot.source.projectId !== snapshot.repository.remoteProjectId) return await finish('needs_human', { reason: 'GitLab fork MR repair is read-only; no cross-project push is attempted.' });
+      if (!sameProjectMergeRequest(snapshot)) return await finish('needs_human', { reason: 'GitLab fork MR repair is read-only; no cross-project push is attempted.' });
       const repair = await runRepair(taskOptions, await seed()); trace.save('repair-result.json', repair);
       if (repair.status !== 'repaired') return await finish(repair.status, { reason: repair.summary });
       await pushSameProjectCandidate('repair', snapshot.source.sha);

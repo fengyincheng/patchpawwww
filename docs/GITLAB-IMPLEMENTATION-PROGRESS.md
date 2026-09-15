@@ -10,6 +10,7 @@
 - 入站/出站接入：新增 `/gitlab/webhook/:connectionId`，普通 MR Note 会先持久化；统一通信 scheduler 可按连接选择 GitLab inbound verifier 和 outbound adapter。GitLab Note 发布会转义独立 slash quick action，并用机器人 numeric ID 做认领。
 - 管理控制台 API：新增 SCM connection 的增删改查、凭据写入、连接验证和按 repository UUID 查询入口；API 只返回 configured 状态，不返回密钥。
 - T3/T6：GitLab worker 已接入 conversation、read-only custom、review、精确 head SHA 的 CI 读取，以及同项目 repair/CI repair 的受控 HTTPS push；fork repair 明确拒绝。发布失败会保留 `publication_pending`/`needs_human`，不会把未确认的 Note 报告为完成；`/stop` 会停止可停止的本地任务并保留可恢复 workspace，运行中的 `/close` 会回复拒绝说明。Conflict 已能生成绑定当前 head/base、workspace evidence 和 Command Snapshot 的只读 Proposal，并通过 durable outbox 发布。
+- P1：GitLab custom `read_write` 已接入同项目 controlled writeback；Agent 已完整 commit 时不重复 commit，dirty-only 或 Agent commit 后残留 dirty 时由 Harness 补 commit；Agent 不得自行 push。push 前校验 source/base/head 与 fast-forward ancestry，push 后通过 GitLab MR API 确认 remote head，确认后才发布 `custom_completed`。fork custom write fail closed，no-op custom 不 commit、不 push。
 - T5/T10：CLI 已支持 `run-pr --repository-id <UUID> <mr-iid>`，并通过控制面解析 GitLab repository storage key；运行时备份包含 SCM slots、排除 Provider 密钥，恢复会重新应用受限权限。
 - T9：Settings 页面新增 GitLab connection 创建、项目白名单、秘密写入状态和验证入口；GitLab-only 配置可启动，重启时会加载控制面中已持久化且凭据完整的连接。
 - T9：控制台 repository 选择、更新和子资源 API 改用 control-plane repository UUID；旧的 GitHub `owner/repo` 路由继续兼容，GitLab storage key 不再作为管理 API 的名称路由。CLI 保留旧入口并增加显式 UUID 入口。
@@ -22,12 +23,12 @@
 - P1：入站执行/批准权限会重新读取 `/users/:id`，只接受 `bot === false` 且 `state === 'active'` 的明确人类 actor，并拒绝 bot、inactive、unknown 和当前 PatchPaw 自身；项目权限仍要求 Developer+。
 - P2：GitLab clone/fetch/push 使用 instance path scoped Git credential，禁止跨 host/path、query、fragment 和凭据 URL；CI 证据按目标 SHA 过滤，旧 SHA、pending、required failure、allow_failure、skipped/no jobs 分别覆盖 green/unknown/pending/red/unknown 语义。
 - 新增定向测试覆盖 GitLab close 生命周期、journal 恢复、idle `/close` 无模型调用、Standard Webhooks、actor 复核、CI 语义、credential scope，以及 stale outbox 不阻塞后续 delivery。
-- 新增 GitLab worker vertical tests：`review`、同项目 `repair`、`conflict` → `/approval`、活动 `/stop`、活动 `/close` refusal；测试使用本地 bare Git 远端和 fake model，不触碰真实 GitLab。
+- 新增 GitLab worker vertical tests：`review`、同项目 `repair`、custom read/write 的 Agent commit、Harness commit、残余 dirty、no-op、Agent push 拦截、source/target drift、历史重写、publication recovery、fork 拒绝、read-only 回归、`conflict` → `/approval`、活动 `/stop`、活动 `/close` refusal；测试使用本地 bare Git 远端和 fake model，不触碰真实 GitLab。
 
 ## 当前验证
 
 - `npm run check` 通过。
-- GitLab 定向测试、GitHub `/close` 回归测试通过；完整 `npm test`：242 个测试、241 通过、1 跳过、0 失败。
+- GitLab 定向测试、GitHub `/close` 回归测试通过；本轮完整 `npm test`：254 个测试、253 通过、1 跳过、0 失败。
 - `npm run build` 已通过；`git diff --check` 将在提交前对 staged diff 再次执行。
 - `npm run verify:frontend` 仍需一个已部署且明确授权的 HTTPS origin，本地开发环境不执行。
 
@@ -40,5 +41,5 @@
 
 ## 提交前验证结果
 
-- `npm run check`、`npm run build`、`npm test` 均通过；`git diff --check` 无错误。
+- `npm run check`、`npm test`、`npm run build`、`git diff --check` 均通过。真实 GitLab custom read/write smoke 尚未因本轮代码变更重新执行。
 - 本轮最终验证通过；real GitLab platform smoke 仍 pending，网络重试/重定向差异和 close/approval 崩溃注入仍待在已授权环境执行。没有据此声称 production verified 或 full GitLab lifecycle fully covered。

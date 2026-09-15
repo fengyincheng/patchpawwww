@@ -106,6 +106,8 @@ export function templateValuesFromSeed(seed: unknown): Record<string, TemplateVa
 
 export interface TaskOptions {
   task: string; prompt: string; ws: WorkspaceState; trace: Trace; runId: string; readOnly?: boolean; evidence?: unknown;
+  /** Custom read/write writeback is Harness-owned; the Agent may edit and commit, but not push. */
+  preventGitPush?: boolean;
   currentBase?: CurrentBaseSnapshot;
   execution?: RuntimeExecution;
   templateValues?: Record<string, TemplateValue>;
@@ -118,6 +120,10 @@ export interface TaskOptions {
   onCloseout?: () => Promise<void>;
 }
 export interface CurrentBaseSnapshot { ref: string; sha: string; }
+
+export function isGitPushCommand(command: string) {
+  return /(?:^|[;&|()\n])\s*(?:env\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)?git(?:\s+\S+){0,8}\s+push(?:\s|$)/i.test(command);
+}
 
 export interface TaskTurnResult {
   text: string;
@@ -242,6 +248,11 @@ export function createTaskSession(options: TaskOptions) {
     hooks: {
       beforeToolCall: ({ toolName, input }) => {
         if (!stopping && options.stopSignal?.aborted) throw new TaskStopped();
+        if (options.preventGitPush && toolName === WORKSPACE_TOOLS.SANDBOX.EXECUTE_COMMAND
+            && typeof input === 'object' && input !== null && 'command' in input && typeof input.command === 'string'
+            && isGitPushCommand(input.command)) {
+          throw new Error('Custom read/write Agent cannot push; the Harness owns GitLab writeback.');
+        }
         const key = toolName + JSON.stringify(input);
         const list = starts.get(key) ?? [];
         const item = { index: ++toolIndex, time: Date.now() }; list.push(item); starts.set(key, list);

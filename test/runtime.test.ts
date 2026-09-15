@@ -6,9 +6,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { createTaskSession } from '../src/harness/runtime.ts';
+import { createTaskSession, isGitPushCommand } from '../src/harness/runtime.ts';
 import { Trace } from '../src/harness/trace.ts';
 import { git } from '../src/workspace/git.ts';
+
+test('Git push command detection covers shell and git option forms', () => {
+  assert.equal(isGitPushCommand('git push origin HEAD:feature'), true);
+  assert.equal(isGitPushCommand('git -C /workspace --git-dir repo push --force'), true);
+  assert.equal(isGitPushCommand('printf "git push"'), false);
+  assert.equal(isGitPushCommand('git status && printf done'), false);
+});
 
 test('Review and Conversation can read the exact fetched current base without changing the PR workspace', async () => {
   const root = await mkdtemp(join(tmpdir(), 'patchpaw-current-base-tools-'));

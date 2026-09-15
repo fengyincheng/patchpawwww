@@ -8,10 +8,14 @@ import { git } from '../src/workspace/git.ts';
 import { ensureRepo, repoCachePath } from '../src/workspace/repo-store.ts';
 import { Trace } from '../src/harness/trace.ts';
 import { runGitLabMergeRequest } from '../src/scm/gitlab/runner.ts';
+import { GitLabAdapter } from '../src/scm/gitlab/adapter.ts';
+import { GitLabClient } from '../src/scm/gitlab/client.ts';
+import type { ScmConnection } from '../src/scm/types.ts';
 import { hasHumanReplies, saveHumanReply, readHumanReplies } from '../src/runner/human-feedback.ts';
 import { statePath, readState } from '../src/runner/state.ts';
 import { patchpawPaths } from '../src/config/paths.ts';
-import { bootstrapControlPlane, closeControlPlaneDb, createCommand, listPrompts, listSkills, openControlPlaneDb, setProviderCredential } from '../src/control-plane/index.ts';
+import { bootstrapControlPlane, closeControlPlaneDb, createCommand, createPrompt, listPrompts, listSkills, openControlPlaneDb, setProviderCredential } from '../src/control-plane/index.ts';
+import { deliverImmediately, listOutbound } from '../src/runner/outbound.ts';
 
 const repo = 'gitlab:worker:project:88';
 
@@ -49,7 +53,12 @@ async function createRemote(root: string, conflict: boolean) {
 }
 
 interface WorkerControl {
-  mode: 'review' | 'repair' | 'conflict' | 'stop' | 'active-close';
+  mode: 'review' | 'repair' | 'conflict' | 'custom' | 'stop' | 'active-close';
+  customMode: 'agent-commit' | 'harness-commit' | 'agent-commit-dirty' | 'agent-push' | 'rewrite' | 'no-op';
+  externalDrift?: 'head' | 'base';
+  driftApplied: boolean;
+  customStep: number;
+  fork: boolean;
   modelCalls: number;
   normalModelCalls: number;
   repairStep: number;
@@ -59,6 +68,7 @@ interface WorkerControl {
   mrState: 'opened' | 'closed' | 'merged';
   nextNoteId: number;
   remoteNotes: any[];
+  failNotePublication: boolean;
   apiCalls: Array<{ method: string; path: string }>;
   mrReads: Array<{ sha: string; targetSha: string }>;
 }
@@ -69,6 +79,8 @@ interface WorkerFixture {
   cloneUrl: string;
   control: WorkerControl;
   path: string;
+  repositoryId: string;
+  modelId: string;
   config: { root: string; snapshotRoot: string; operatorLogin: string; gitlabConnections: Array<{ id: string; instanceUrl: string; projectIds: string[]; token: string; botUserId: string; botLogin: string }> };
   modelReady: Promise<void>;
   addComment: (id: number, body: string, authorId?: string) => Promise<void>;
@@ -88,8 +100,8 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
   instanceUrl = `http://127.0.0.1:${address.port}/gitlab`;
   const cloneUrl = `${instanceUrl}/group/repo.git`;
   const path = statePath(patchpawPaths(root).state, repo, 3);
-  const control: WorkerControl = { mode, modelCalls: 0, normalModelCalls: 0, repairStep: 0, holdNormalModel: false,
-    mrState: 'opened', nextNoteId: 700, remoteNotes: [], apiCalls: [], mrReads: [] };
+  const control: WorkerControl = { mode, customMode: 'harness-commit', customStep: 0, fork: false, driftApplied: false, modelCalls: 0, normalModelCalls: 0, repairStep: 0, holdNormalModel: false,
+    mrState: 'opened', nextNoteId: 700, remoteNotes: [], failNotePublication: false, apiCalls: [], mrReads: [] };
   const config = { root, snapshotRoot: join(root, 'snapshots'), operatorLogin: 'operator', gitlabConnections: [{ id: 'worker', instanceUrl,
     projectIds: ['88'], token: 'fixture-token', botUserId: '900', botLogin: 'patchpaw' }] };
   t.after(async () => {
@@ -102,8 +114,8 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
     webUrl: `${instanceUrl}/group/repo`, cloneUrl, storageKey: repo,
   }] });
   const controlPlane = await openControlPlaneDb(root);
+  const repository = bootstrap.repositories[0]!;
   try {
-    const repository = bootstrap.repositories[0]!;
     await setProviderCredential(controlPlane, root, bootstrap.provider.id, 'fixture-secret');
     const prompts = await listPrompts(controlPlane, { scope: 'repository', repositoryId: repository.id });
     const skills = await listSkills(controlPlane, { scope: 'repository', repositoryId: repository.id });
@@ -124,11 +136,42 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
   await git(repoCachePath(root, repo), ['config', `url.${remote.bare}.insteadOf`, cloneUrl], seedTrace);
   const modelReady = new Promise<void>(resolve => { control.modelStarted = resolve; });
   const modelReleased = new Promise<void>(resolve => { control.releaseNormalModel = resolve; });
+  const advanceRemoteBranch = async (branch: 'feature' | 'main') => {
+    await git(remote.source, ['switch', branch]);
+    await writeFile(join(remote.source, 'drift.txt'), `${branch} drift\n`);
+    await git(remote.source, ['add', 'drift.txt']); await git(remote.source, ['commit', '-m', `External ${branch} drift`]);
+    await git(remote.source, ['push', 'fixture', branch]);
+  };
   const responseForModel = async (body: any) => {
     control.modelCalls++;
     const tools = (body.tools ?? []) as Array<{ function?: { name?: string } }>;
     const toolNames = new Set(tools.map(tool => tool.function?.name));
     const stopCloseout = toolNames.size === 1 && toolNames.has('submit_stop_report');
+    if (control.mode === 'custom') {
+      const step = control.customStep++;
+      if (control.customMode === 'no-op' || step >= (control.customMode === 'agent-commit-dirty' ? 2 : 1)) {
+        if (control.externalDrift && !control.driftApplied) {
+          control.driftApplied = true;
+          await advanceRemoteBranch(control.externalDrift === 'head' ? 'feature' : 'main');
+        }
+        return json({ id: `custom-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
+          message: { role: 'assistant', content: 'CUSTOM_NATURAL_LANGUAGE_ANSWER' }, finish_reason: 'stop' }] });
+      }
+      const tool = control.customMode === 'agent-commit'
+        ? { name: 'mastra_workspace_execute_command', args: { command: "printf 'agent\\n' > sample.txt && git add sample.txt && git commit -m 'Agent authored custom fix'" } }
+        : control.customMode === 'agent-push'
+        ? { name: 'mastra_workspace_execute_command', args: { command: "printf 'agent\\n' > sample.txt && git add sample.txt && git commit -m 'Agent authored custom fix' && git push origin HEAD:refs/heads/feature" } }
+        : control.customMode === 'rewrite'
+        ? { name: 'mastra_workspace_execute_command', args: { command: "git checkout --orphan rewritten && git rm -rf . && printf 'rewritten\\n' > rewritten.txt && git add rewritten.txt && git commit -m 'Rewritten custom history'" } }
+        : control.customMode === 'agent-commit-dirty'
+        ? step === 0
+          ? { name: 'mastra_workspace_execute_command', args: { command: "printf 'agent\\n' > sample.txt && git add sample.txt && git commit -m 'Agent authored custom fix'" } }
+          : { name: 'mastra_workspace_execute_command', args: { command: "printf 'residual\\n' > residual.txt" } }
+        : { name: 'mastra_workspace_edit_file', args: { path: 'sample.txt', old_string: 'base', new_string: 'harness' } };
+      return json({ id: `custom-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
+        message: { role: 'assistant', content: '', tool_calls: [{ id: `custom-call-${control.modelCalls}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] },
+        finish_reason: 'tool_calls' }] });
+    }
     if (stopCloseout) return json({ id: `stop-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
       message: { role: 'assistant', content: '', tool_calls: [{ id: `call-${control.modelCalls}`, type: 'function', function: { name: 'submit_stop_report', arguments: JSON.stringify({ summary: '已收到停止请求，工作区保留。' }) } }] },
       finish_reason: 'tool_calls' }] });
@@ -169,11 +212,12 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
       control.apiCalls.push({ method, path: url.pathname });
       if (url.pathname === '/gitlab/api/v4/user') return sendJson(response, json({ id: 900, username: 'patchpaw', bot: true, state: 'active' }));
       if (url.pathname === '/gitlab/api/v4/projects/88') return sendJson(response, json({ id: 88, path_with_namespace: 'group/repo', web_url: `${instanceUrl}/group/repo`, http_url_to_repo: cloneUrl }));
+      if (url.pathname === '/gitlab/api/v4/projects/99') return sendJson(response, json({ id: 99, path_with_namespace: 'other/repo', web_url: `${instanceUrl}/other/repo`, http_url_to_repo: cloneUrl }));
       if (url.pathname === '/gitlab/api/v4/projects/88/merge_requests/3') {
         const head = (await git(remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
         const main = (await git(remote.bare, ['rev-parse', 'refs/heads/main'])).stdout.trim();
         control.mrReads.push({ sha: head, targetSha: main });
-        return sendJson(response, json({ iid: 3, state: control.mrState, source_project_id: 88, target_project_id: 88, source: { path_with_namespace: 'group/repo' },
+        return sendJson(response, json({ iid: 3, state: control.mrState, source_project_id: control.fork ? 99 : 88, target_project_id: 88, source: { path_with_namespace: control.fork ? 'other/repo' : 'group/repo' },
           target: { path_with_namespace: 'group/repo' }, source_branch: 'feature', target_branch: 'main', sha: head,
           diff_refs: { base_sha: remote.base, start_sha: main }, title: 'Fixture MR', description: 'Fixture body', author: { id: 17, username: 'developer' },
           web_url: `${instanceUrl}/group/repo/-/merge_requests/3` }));
@@ -188,6 +232,7 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
       }
       if (url.pathname === '/gitlab/api/v4/projects/88/merge_requests/3/notes' && method === 'GET') return sendJson(response, json(control.remoteNotes));
       if (url.pathname === '/gitlab/api/v4/projects/88/merge_requests/3/notes' && method === 'POST') {
+        if (control.failNotePublication) return sendJson(response, json({ message: 'fixture publication failure' }, 400));
         const payload = JSON.parse(body || '{}') as { body?: string };
         const created = { id: ++control.nextNoteId, body: payload.body ?? '', author: { id: 900, username: 'patchpaw' }, web_url: `${instanceUrl}/note/${control.nextNoteId}`,
           created_at: new Date().toISOString(), system: false };
@@ -200,12 +245,22 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
       throw new Error(`Unexpected GitLab fixture endpoint: ${method} ${url.pathname}`);
     } catch (error) { sendJson(response, json({ message: (error as Error).message }, 500)); }
   });
-  return { root, remote, cloneUrl, control, path, config, modelReady, addComment: async (id: number, body: string, authorId = '17') => {
+  return { root, remote, cloneUrl, control, path, repositoryId: repository.id, modelId: bootstrap.model.id, config, modelReady, addComment: async (id: number, body: string, authorId = '17') => {
     const createdAt = new Date(Date.now() + id * 1000).toISOString();
     control.remoteNotes.push({ id, body, author: { id: Number(authorId), username: authorId === '17' ? 'developer' : 'operator' }, web_url: `https://git.example/note/${id}`, created_at: createdAt, system: false });
     await saveHumanReply(path, { repo, pr_number: 3, comment_id: id, author: authorId === '17' ? 'developer' : 'operator', author_id: authorId,
       body, url: `https://git.example/group/repo/-/merge_requests/3#note_${id}`, created_at: createdAt, source_event_id: `fixture-${id}`, platform: 'gitlab', connection_id: 'worker', project_id: '88', repository_path: 'group/repo' });
   } };
+}
+
+async function addCustomCommand(fixture: WorkerFixture, permission: 'read_only' | 'read_write' = 'read_write') {
+  const db = await openControlPlaneDb(fixture.root);
+  try {
+    const prompt = await createPrompt(db, { scope: 'repository', repositoryId: fixture.repositoryId, slug: 'custom-edit', title: 'Custom edit', role: null,
+      content: 'CUSTOM_EDIT_MARKER\nMake the requested change in the writable workspace, then explain what you did.' });
+    return await createCommand(db, { repositoryId: fixture.repositoryId, slashName: '/edit', displayName: 'Edit', executionType: 'custom', permission,
+      providerModelId: fixture.modelId, promptBindings: [{ assetId: prompt.id, position: 1, enabled: true, bindingKind: 'main' }], skillBindings: [] });
+  } finally { closeControlPlaneDb(db); }
 }
 
 test('GitLab worker review publishes a durable review on the current head', async t => {
@@ -236,6 +291,147 @@ test('GitLab worker repair pushes only the same-project source branch before pub
   assert.ok(lastHeadRead >= 0 && notePublish > lastHeadRead);
   assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('## GitLab repair')));
   assert.ok(fixture.control.apiCalls.filter(value => value.path.endsWith('/merge_requests/3')).length >= 2);
+});
+
+test('GitLab custom read_write pushes an Agent commit without a duplicate Harness commit', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.customMode = 'agent-commit'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  assert.equal(result?.status, 'custom_completed');
+  assert.notEqual(after, before);
+  assert.equal((await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim(), '1');
+  assert.equal((await git(fixture.remote.bare, ['log', '-1', '--format=%s', after])).stdout.trim(), 'Agent authored custom fix');
+  assert.equal(typeof (result as any).run_id, 'string');
+  assert.equal((await readFile(join(fixture.root, 'runs', (result as any).run_id, 'trace.jsonl'), 'utf8')).includes('"source":"agent"'), true);
+  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('PatchPaw writeback') && note.body.includes(after)));
+});
+
+test('GitLab custom read_write lets the Harness commit an uncommitted Agent change', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.customMode = 'harness-commit'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  assert.equal(result?.status, 'custom_completed');
+  assert.notEqual(after, before);
+  assert.equal((await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim(), '1');
+  assert.equal((await git(fixture.remote.bare, ['log', '-1', '--format=%s', after])).stdout.trim(), 'fix: PatchPaw custom repair');
+  assert.equal((result as any).writeback, 'pushed');
+  assert.equal((result as any).commit_sha, after);
+});
+
+test('GitLab custom read_write commits residual dirty changes after an Agent commit', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.customMode = 'agent-commit-dirty'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  assert.equal(result?.status, 'custom_completed');
+  assert.equal((await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim(), '2');
+  assert.equal((await git(fixture.remote.bare, ['show', `${after}:sample.txt`])).stdout, 'agent\n');
+  assert.equal((await git(fixture.remote.bare, ['show', `${after}:residual.txt`])).stdout, 'residual\n');
+  assert.equal((result as any).commit_sha, after);
+});
+
+test('GitLab custom read_write no-op publishes without committing or pushing', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.customMode = 'no-op'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  assert.equal(result?.status, 'custom_completed');
+  assert.equal(after, before);
+  assert.equal((result as any).writeback, 'no_changes');
+  assert.equal(fixture.control.apiCalls.some(call => call.method === 'POST' && call.path.endsWith('/repository/commits')), false);
+});
+
+test('GitLab custom writeback publication recovery retries the durable Note without rerunning the Agent', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.failNotePublication = true; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  assert.equal(result?.status, 'needs_human');
+  assert.notEqual(after, before);
+  const stored = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'custom_completed');
+  assert.ok(stored); assert.equal(stored!.item.status, 'blocked');
+  const modelCalls = fixture.control.modelCalls;
+  const commits = (await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim();
+  fixture.control.failNotePublication = false;
+  const connection: ScmConnection = { id: 'worker', kind: 'gitlab', instanceUrl: fixture.config.gitlabConnections[0]!.instanceUrl,
+    credentialRef: null, webhookMode: 'secret', webhookSecretRef: null, botUserId: '900', botLogin: 'patchpaw', projectIds: ['88'], enabled: true, createdAt: '', updatedAt: '' };
+  const adapter = new GitLabAdapter(connection, new GitLabClient({ baseUrl: connection.instanceUrl, token: 'fixture-token' }), { id: '900', username: 'patchpaw' });
+  const retry = await deliverImmediately(fixture.root, stored!, { adapter, botLogin: 'patchpaw' });
+  assert.equal(retry.item.status, 'delivered');
+  assert.equal(fixture.control.modelCalls, modelCalls);
+  assert.equal((await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim(), commits);
+  assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), after);
+});
+
+test('GitLab custom read_write blocks an Agent-authored push and keeps Harness writeback authoritative', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.customMode = 'agent-push'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'custom_completed');
+  assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
+  assert.equal((result as any).writeback, 'no_changes');
+  assert.equal(fixture.control.modelCalls, 2, 'the blocked command is returned to the Agent as a tool error');
+});
+
+test('GitLab custom read_write fails closed when the remote MR head drifts before push', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.externalDrift = 'head'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  assert.equal(result?.status, 'needs_human'); assert.notEqual(after, before);
+  assert.equal((await git(fixture.remote.bare, ['show', `${after}:drift.txt`])).stdout, 'feature drift\n');
+  assert.equal((await git(fixture.remote.bare, ['log', '-1', '--format=%s', after])).stdout.trim(), 'External feature drift');
+});
+
+test('GitLab custom read_write fails closed when the target branch drifts before push', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.externalDrift = 'base'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const beforeFeature = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const beforeMain = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/main'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'needs_human');
+  assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), beforeFeature);
+  assert.notEqual((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/main'])).stdout.trim(), beforeMain);
+});
+
+test('GitLab custom read_write rejects rewritten candidate history before push', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.customMode = 'rewrite'; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'needs_human');
+  assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
+  assert.ok(fixture.control.apiCalls.every(call => !call.path.endsWith('/repository/commits')));
+});
+
+test('GitLab custom read_write rejects fork MRs before starting the Agent', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.fork = true; await addCustomCommand(fixture);
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'needs_human');
+  assert.equal((result as any).reason, 'GitLab fork MR custom read/write is read-only; no cross-project push is attempted.');
+  assert.equal(fixture.control.normalModelCalls, 0);
+  assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
+});
+
+test('GitLab custom read_only keeps the existing non-writing behavior', async t => {
+  const fixture = await workerFixture(t, 'custom'); fixture.control.customMode = 'no-op'; await addCustomCommand(fixture, 'read_only');
+  await fixture.addComment(100, '@patchpaw /edit');
+  const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'custom_completed');
+  assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
+  assert.equal((result as any).writeback, undefined);
 });
 
 test('GitLab conflict proposal stays read-only until approval, then pushes the bound repair', async t => {

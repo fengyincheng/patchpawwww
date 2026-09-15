@@ -20,7 +20,7 @@ export async function prepareWorkspace(input: { path: string; headSha: string; b
   return { path: input.path, initialHead: input.headSha, mainSha, unmerged, mergePending,
     verificationInputs: await captureVerificationInputs(input.path, trace) };
 }
-async function repairChanges(ws: WorkspaceState, startHead: string, trace: Trace) {
+export async function workspaceChangesSince(ws: WorkspaceState, startHead: string, trace: Trace) {
   const head = (await git(ws.path, ['rev-parse', 'HEAD'], trace)).stdout.trim();
   const dirty = !!(await git(ws.path, ['status', '--porcelain'], trace)).stdout.trim();
   const mergePending = (await git(ws.path, ['rev-parse', '--verify', 'MERGE_HEAD'], trace, undefined, true)).exitCode === 0;
@@ -45,7 +45,7 @@ export async function validateWorkspace(ws: WorkspaceState, tests: string[], tra
   const unmerged = await git(ws.path, ['ls-files', '-u'], trace);
   const unstaged = await git(ws.path, ['diff', '--check'], trace, undefined, true);
   const staged = await git(ws.path, ['diff', '--cached', '--check'], trace, undefined, true);
-  const changes = startHead ? await repairChanges(ws, startHead, trace) : null;
+  const changes = startHead ? await workspaceChangesSince(ws, startHead, trace) : null;
   // Check the full candidate, including committed edits AND subsequent working-tree corrections.
   const candidate = startHead ? await git(ws.path, ['diff', '--check', startHead], trace, undefined, true) : null;
   const checks = [unstaged, staged, candidate].filter(check => check !== null);
@@ -67,7 +67,7 @@ export async function validateWorkspace(ws: WorkspaceState, tests: string[], tra
 }
 export async function commitRepair(ws: WorkspaceState, kind: string, trace: Trace, startHead: string) {
   await git(ws.path, ['add', '-A'], trace);
-  const changes = await repairChanges(ws, startHead, trace);
+  const changes = await workspaceChangesSince(ws, startHead, trace);
   if (!changes.has_changes) throw new Error('No changes since this repair started; refusing a no-op repair');
   const needsCommit = changes.dirty || changes.merge_pending;
   if (needsCommit) await git(ws.path, ['commit', '-m', `fix: PatchPaw ${kind} repair`], trace);

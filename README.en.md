@@ -245,7 +245,7 @@ Do not modify files or commit code.
 
 Names must start with a lowercase letter and contain only lowercase letters, digits and hyphens, up to 32 characters. Reserved names include stop, close, approval, approve and confict. Enabled commands require at least one enabled main prompt. Public assets must first be available as repository-bindable assets; creating a prompt or skill alone does not attach it to a command.
 
-**Custom commands use only the selected prompt/skill stack, without inheriting Review, CI or Conflict instructions or publication workflows.** Choosing read_write does not add the built-in CI verification/commit flow; choose the appropriate execution type when that flow is needed. Set permissions in configuration, not just in prompt wording. Conversations have a separate profile.
+**Custom commands use only the selected prompt/skill stack, without inheriting Review, CI or Conflict instructions.** For GitLab commands, read_write lets the Agent edit and normally commit the workspace; the Harness owns the commit, non-force push, remote MR-head confirmation, and final Note publication, and blocks Agent-authored pushes. read_write still does not add the built-in CI repair workflow; choose the appropriate execution type when that flow is needed. Set permissions in configuration, not just in prompt wording. Conversations have a separate profile.
 
 Each execution fixes its effective configuration snapshot. Editing the console does not replace instructions mid-run, and resuming an earlier execution may retain its original snapshot.
 

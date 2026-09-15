@@ -259,7 +259,7 @@ Webhook 返回 `202 verification_pending` 表示已入队，还需确认机器�
 
 命令名为 1–32 个字符，小写字母开头，仅含小写字母、数字、连字符；不要占用 `stop`、`close`、`approval`、`approve`、`confict` 等保留名称。启用的命令至少要有一个启用的 main Prompt。公共资产需要先成为该仓库可绑定的资产；仅创建 Prompt/Skill 不会自动使其参与命令。
 
-**custom 只使用你选定的 Prompt/Skill，不会继承 Review、CI 或 Conflict 的内置指令与发布流程。** 切成 read_write 也不等于自动获得 CI 修复的验证和提交流程；需要内置流程时选择相应执行类型。权限要在配置中设置，不能只靠 Prompt 里写“只读”。普通对话有独立配置，修改某个命令不会同时更改普通对话。
+**custom 只使用你选定的 Prompt/Skill，不会继承 Review、CI 或 Conflict 的内置指令。** 对 GitLab 命令，切成 read_write 后 Agent 可以修改并正常 commit workspace；提交、非强制 push、远端 MR head 确认和最终 Note 发布由 Harness 负责，Agent 不能自行 push。read_write 仍不等于自动获得 CI 修复流程；需要其他内置流程时选择相应执行类型。权限要在配置中设置，不能只靠 Prompt 里写“只读”。普通对话有独立配置，修改某个命令不会同时更改普通对话。
 
 运行时会固定本次生效配置快照；编辑控制台不会把已启动任务的指令中途替换。恢复旧执行时可能沿用其原始快照。
 
