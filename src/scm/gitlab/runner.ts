@@ -35,7 +35,7 @@ import { runConflict } from '../../tasks/conflict/agent.ts';
 import { captureConflictWorkspaceEvidence, compareConflictWorkspaceEvidence, workspaceEvidenceSha256, type ConflictWorkspaceEvidence } from '../../runner/workspace-evidence.ts';
 import { readArtifact } from '../../runner/review-lifecycle.ts';
 import { readHumanReplies } from '../../runner/human-feedback.ts';
-import { newConflictApproval, readConflictApproval, readUnfinishedConflictApproval, saveConflictApproval, updateConflictApproval, type ConflictApprovalRecord } from '../../runner/conflict-approval.ts';
+import { approvalDeliverySemanticKey, newConflictApproval, readConflictApproval, readUnfinishedConflictApproval, saveConflictApproval, updateConflictApproval, type ConflictApprovalRecord } from '../../runner/conflict-approval.ts';
 import { createConflictProposal, markConflictProposalStatus, proposalDeliverySemanticKey, proposalPointerForState, readCurrentConflictProposal, renderConflictProposal, saveConflictProposal, saveProposalState } from '../../runner/conflict-proposals.ts';
 import { closeRefusalBody, hasPendingClose, resumePendingClose, retryPendingCloseCompletion, runClose } from '../../runner/close.ts';
 import { ReviewStale } from '../errors.ts';
@@ -550,7 +550,7 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
         const answer = `## GitLab Conflict 修复完成\n\n${repair?.summary ?? '已恢复已确认的修复结果。'}\n\nCommit: \`${state.current_head_sha}\`\n验证：${repair?.tests?.join('; ') ?? '已确认 durable repair evidence'}`;
         trace.save('delivery.json', { status: 'repair_completed', head_sha: state.current_head_sha, body: answer, approval_id: approvalRecord.approval_id, proposal_hash: proposal.proposal_hash });
         const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose: 'conflict_repair',
-          semanticKey: proposalDeliverySemanticKey({ ...proposal, status: 'published' }), body: answer, mentions, botLogin,
+          semanticKey: approvalDeliverySemanticKey(approvalRecord), body: answer, mentions, botLogin,
           source: { run_id: approvalRecord.repair_run_id ?? runId, approval_id: approvalRecord.approval_id, proposal_id: approvalRecord.proposal_id,
             proposal_revision: approvalRecord.proposal_revision, proposal_hash: approvalRecord.proposal_hash, commit_sha: state.current_head_sha,
             repair_execution_id: approvalRecord.repair_execution_id } });

@@ -60,7 +60,7 @@ export class GitLabAdapter implements ScmAdapter {
     if (String(note.id) !== String(comment.remoteId) || String(note.author?.id ?? '') !== comment.authorId || String(note.body ?? '') !== comment.body) throw Object.assign(new Error('GitLab note identity mismatch'), { status: 403 });
     const level = mappedAccess(authorization.data?.access_level ?? authorization.data?.accessLevel);
     const user = actor.data ?? {};
-    const active = user.state === undefined || user.state === 'active';
+    const active = user.state === 'active';
     const knownHuman = user.bot === false;
     const isSelf = this.botUserId !== undefined && String(this.botUserId) === comment.authorId;
     const can = level !== null && level >= 30 && authorization.data?.state !== 'blocked' && active && knownHuman && !isSelf;
@@ -85,7 +85,7 @@ export class GitLabAdapter implements ScmAdapter {
 
   async publishReview(projectId: string, number: number, headSha: string, review: ReviewResult, mentions: string[], marker: string) {
     const body = `## PatchPaw review\n\n${mentions.map(value => `@${value}`).join(' ')}\n\nHead: \`${headSha}\`\n\n${review.summary}\n\nRecommendation: **${review.recommendation}**\n\n${review.findings.map(f => `- ${f.severity}: ${f.path}:${f.line} — ${f.title}\n  ${f.evidence}`).join('\n')}\n\nLimitations: ${review.limitations.join('; ') || 'None'}\n\n${marker}`;
-    const current = await this.readChangeRequest(projectId, number);
+    const current = await this.readChangeRequest(projectId, number, { allowClosed: true });
     if (current.state !== 'opened' || current.source.sha !== headSha) {
       throw new ReviewStale(headSha, current.source.sha, current.state);
     }

@@ -18,15 +18,16 @@
 
 - P0：GitLab `/close` 已改走与 GitHub 相同的 durable close journal 和 cleanup 顺序。开始通知、workspace/run/memory/snapshot/inbox 清理、closed-through tombstone、完成通知与失败重试都由共享 lifecycle 执行；GitLab 只通过 adapter 发布 Note，不调用远端 MR close API。启动时发现 `closing` journal 会机械恢复，旧 webhook 会被 tombstone 过滤。
 - P0：Standard Webhooks 校验现在严格解码 `whsec_<base64>` 的 32 字节 key，并按 `${webhook-id}.${webhook-timestamp}.` 加原始 body 做 HMAC-SHA256，要求 `v1,<base64>` 且使用常量时间比较；signing 模式缺少 `webhook-id` 时拒绝，legacy token 不可降级。
-- P1：GitLab review 的过期 head 已统一抛出 SCM-neutral `ReviewStale`，outbox 会标记 `cancelled_stale`；scheduler 和 GitLab worker 都能通过 adapter 完成 stale finalization，不会阻塞同一 MR 后续消息。
-- P1：入站执行/批准权限会重新读取 `/users/:id`，只接受明确的人类、active actor，并拒绝 bot、inactive、unknown 和当前 PatchPaw 自身；项目权限仍要求 Developer+。
+- P1：GitLab review 的过期 head、closed MR 和 merged MR 已统一抛出 SCM-neutral `ReviewStale`，outbox 会标记 `cancelled_stale`；scheduler 和 GitLab worker 都能通过 adapter 完成 stale finalization，不会阻塞同一 MR 后续消息。
+- P1：入站执行/批准权限会重新读取 `/users/:id`，只接受 `bot === false` 且 `state === 'active'` 的明确人类 actor，并拒绝 bot、inactive、unknown 和当前 PatchPaw 自身；项目权限仍要求 Developer+。
 - P2：GitLab clone/fetch/push 使用 instance path scoped Git credential，禁止跨 host/path、query、fragment 和凭据 URL；CI 证据按目标 SHA 过滤，旧 SHA、pending、required failure、allow_failure、skipped/no jobs 分别覆盖 green/unknown/pending/red/unknown 语义。
 - 新增定向测试覆盖 GitLab close 生命周期、journal 恢复、idle `/close` 无模型调用、Standard Webhooks、actor 复核、CI 语义、credential scope，以及 stale outbox 不阻塞后续 delivery。
+- 新增 GitLab worker vertical tests：`review`、同项目 `repair`、`conflict` → `/approval`、活动 `/stop`、活动 `/close` refusal；测试使用本地 bare Git 远端和 fake model，不触碰真实 GitLab。
 
 ## 当前验证
 
 - `npm run check` 通过。
-- GitLab 定向测试、GitHub `/close` 回归测试通过；完整 `npm test`：236 个测试、235 通过、1 跳过、0 失败。
+- GitLab 定向测试、GitHub `/close` 回归测试通过；完整 `npm test`：242 个测试、241 通过、1 跳过、0 失败。
 - `npm run build` 已通过；`git diff --check` 将在提交前对 staged diff 再次执行。
 - `npm run verify:frontend` 仍需一个已部署且明确授权的 HTTPS origin，本地开发环境不执行。
 
@@ -40,4 +41,4 @@
 ## 提交前验证结果
 
 - `npm run check`、`npm run build`、`npm test` 均通过；`git diff --check` 无错误。
-- 真实 GitLab 实例 smoke、网络重试/重定向差异和 close/approval 崩溃注入仍待在已授权环境执行。
+- 本轮最终验证通过；real GitLab platform smoke 仍 pending，网络重试/重定向差异和 close/approval 崩溃注入仍待在已授权环境执行。没有据此声称 production verified 或 full GitLab lifecycle fully covered。
