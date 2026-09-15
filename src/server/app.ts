@@ -13,7 +13,7 @@ import { configuredRuntimeHome } from '../config/env.ts';
 import { registerAdminApi } from './admin-api.ts';
 import { withRuntimeLock } from '../migration/runtime-lock.ts';
 import { publicSetupInfo } from './public-setup.ts';
-import { normalizeNoteHook, verifyLegacyToken, verifyStandardSignature } from '../scm/gitlab/webhook.ts';
+import { decodeStandardSigningToken, normalizeNoteHook, verifyLegacyToken, verifyStandardSignature } from '../scm/gitlab/webhook.ts';
 import type { ScmInboundReader } from '../scm/types.ts';
 
 export interface ServerConfig {
@@ -55,6 +55,9 @@ const frontendContentTypes: Record<string, string> = {
 
 export function buildServer(config: ServerConfig, github: GitHubReader | undefined, logger = false,
   onComment?: (comment: HumanReply) => Promise<void>) {
+  for (const endpoint of config.gitlabWebhooks ?? []) {
+    if (endpoint.webhookMode === 'signing') decodeStandardSigningToken(endpoint.webhookSecret);
+  }
   const app = Fastify({ logger, bodyLimit: 25 * 1024 * 1024 });
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
@@ -141,7 +144,7 @@ export function buildServer(config: ServerConfig, github: GitHubReader | undefin
     if (!endpoint || !Buffer.isBuffer(request.body)) return reply.code(404).send({ status: 'not_found' });
     const header = (name: string) => typeof request.headers[name] === 'string' ? request.headers[name] as string : undefined;
     const valid = endpoint.webhookMode === 'signing'
-      ? verifyStandardSignature({ body: request.body, signature: header('webhook-signature'), webhookId: header('webhook-id') ?? header('x-gitlab-webhook-uuid'), timestamp: header('webhook-timestamp'), secret: endpoint.webhookSecret })
+      ? verifyStandardSignature({ body: request.body, signature: header('webhook-signature'), webhookId: header('webhook-id'), timestamp: header('webhook-timestamp'), secret: endpoint.webhookSecret })
       : verifyLegacyToken(header('x-gitlab-token'), endpoint.webhookSecret);
     if (!valid) return reply.code(401).send({ status: 'invalid_signature' });
     let payload: unknown;

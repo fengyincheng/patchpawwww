@@ -6,7 +6,7 @@ import { loadCommandSnapshot } from '../control-plane/index.ts';
 import { Trace } from '../harness/trace.ts';
 import { disposeWorkspacePath, isManagedWorktree } from '../workspace/repo-store.ts';
 import { claimRun, readState, statePath, workerStatus, writeState } from './state.ts';
-import { closeCompleteBody, closeStartBody, resumePendingClose } from './close.ts';
+import { closeCompleteBodyFor, closeStartBodyFor, resumePendingClose } from './close.ts';
 import { closeoutMarker } from './closeout-publication.ts';
 import { retryAfterMs } from '../harness/retry.ts';
 import { drainDueDeliveries, enqueueCommentDelivery, enqueueReviewDelivery, OUTBOUND_LOCK_BUSY_RETRY_MS, safeError, type OutboundConnection, type OutboundItem, type StoredItem } from './outbound.ts';
@@ -179,7 +179,7 @@ export async function reconcileLegacyOutbox(config: SchedulerConfig, botLogin?: 
     const mentions = state.close_mentions ?? [state.repo.split('/')[0]];
     if (state.completion_notice_status === 'pending' && state.closed_through_comment_id) {
       await enqueueCommentDelivery({ root: config.root, repo: state.repo, prNumber: state.pr_number, purpose: 'close_completion',
-        semanticKey: `close-completion:${state.close_comment_id ?? state.closed_through_comment_id}`, body: closeCompleteBody, mentions,
+        semanticKey: `close-completion:${state.close_comment_id ?? state.closed_through_comment_id}`, body: closeCompleteBodyFor(state.repo), mentions,
         botLogin, source: { close_comment_id: state.close_comment_id ?? state.closed_through_comment_id } });
     }
     if (state.pending_close_refusal) {
@@ -192,7 +192,7 @@ export async function reconcileLegacyOutbox(config: SchedulerConfig, botLogin?: 
     const journal = await json(`${path}.close.json`);
     if (journal?.status === 'closing' && !journal.start_notice_id) {
       await enqueueCommentDelivery({ root: config.root, repo: state.repo, prNumber: state.pr_number, purpose: 'close_start',
-        semanticKey: `close-start:${journal.close_comment_id}`, body: closeStartBody, mentions: journal.mentions ?? [], botLogin,
+        semanticKey: `close-start:${journal.close_comment_id}`, body: closeStartBodyFor(state.repo), mentions: journal.mentions ?? [], botLogin,
         source: { close_comment_id: journal.close_comment_id } });
     }
   }
@@ -219,12 +219,20 @@ async function finalizeDelayedDeliveryOwned(config: SchedulerConfig, stored: Sto
     let actualHead = '';
     let prState = 'unknown';
     try {
-      const [owner, repo] = item.repo.split('/');
       const resolved = await resolveConnection();
-      if (!resolved) throw new Error('GitHub connection required for stale Review finalization');
-      if (!resolved.client) throw new Error('GitHub client required for stale Review finalization');
-      const { data } = await resolved.client.rest.pulls.get({ owner, repo, pull_number: item.pr_number });
-      actualHead = data.head.sha; prState = data.state;
+      if (!resolved) throw new Error('SCM connection required for stale Review finalization');
+      if (resolved.adapter) {
+        const projectId = typeof item.source.project_id === 'string' || typeof item.source.project_id === 'number'
+          ? String(item.source.project_id) : item.repo.match(/^gitlab:(.+):project:(.+)$/)?.[2];
+        if (!projectId) throw new Error('GitLab stale Review is missing its project id');
+        const changeRequest = await resolved.adapter.readChangeRequest(projectId, item.pr_number, { allowClosed: true });
+        actualHead = changeRequest.source.sha; prState = changeRequest.state;
+      } else {
+        if (!resolved.client) throw new Error('GitHub client required for stale Review finalization');
+        const [owner, repo] = item.repo.split('/');
+        const { data } = await resolved.client.rest.pulls.get({ owner, repo, pull_number: item.pr_number });
+        actualHead = data.head.sha; prState = data.state;
+      }
     } catch { /* cancellation remains durable if the read is unavailable */ }
     const trace = new Trace(dir);
     trace.save('review-stale.json', { expected_head: String(item.source.head_sha ?? ''), actual_head: actualHead, pr_state: prState });
@@ -372,9 +380,8 @@ async function finalizeDelayedDeliveryOwned(config: SchedulerConfig, stored: Sto
     const journal = await json(`${path}.close.json`);
     if (journal?.status === 'closing') {
       const resolved = await resolveConnection();
-      if (!resolved) throw new Error('GitHub connection required for close finalization');
-      if (!resolved.client) throw new Error('GitHub client required for close finalization');
-      await resumePendingClose(config, item.repo, item.pr_number, path, resolved.client, resolved.botLogin);
+      if (!resolved) throw new Error('SCM connection required for close finalization');
+      await resumePendingClose(config, item.repo, item.pr_number, path, resolved, resolved.botLogin);
     }
   }
   return done();

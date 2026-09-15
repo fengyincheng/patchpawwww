@@ -11,14 +11,25 @@ export function verifyLegacyToken(received: string | undefined, expected: string
   return equal(Buffer.from(received), Buffer.from(expected));
 }
 
+export function decodeStandardSigningToken(token: string) {
+  if (!token.startsWith('whsec_')) throw new Error('GitLab Standard Webhooks signing token must start with whsec_');
+  const encoded = token.slice('whsec_'.length);
+  if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    throw new Error('GitLab Standard Webhooks signing token is not valid base64');
+  }
+  const key = Buffer.from(encoded, 'base64');
+  if (key.length !== 32) throw new Error('GitLab Standard Webhooks signing token must decode to 32 bytes');
+  return key;
+}
+
 export function verifyStandardSignature(input: { body: Buffer; signature?: string; webhookId?: string; timestamp?: string; secret: string; maxAgeSeconds?: number; nowMs?: number }) {
   const { body, signature, webhookId, timestamp, secret } = input;
   if (!signature || !webhookId || !timestamp || !/^\d+$/.test(timestamp)) return false;
   const age = Math.abs((input.nowMs ?? Date.now()) - Number(timestamp) * 1000);
   if (age > (input.maxAgeSeconds ?? 300) * 1000) return false;
-  const expected = createHmac('sha256', secret).update(`${webhookId}.${timestamp}.`).update(body).digest('base64');
-  const candidates = signature.split(/\s+/).map(value => value.replace(/^v1,/, '')).filter(Boolean);
-  return candidates.some(value => equal(Buffer.from(value), Buffer.from(expected)) || equal(Buffer.from(value, 'base64'), Buffer.from(expected, 'base64')));
+  const key = decodeStandardSigningToken(secret);
+  const expected = `v1,${createHmac('sha256', key).update(`${webhookId}.${timestamp}.`).update(body).digest('base64')}`;
+  return signature.split(/\s+/).filter(Boolean).some(value => equal(Buffer.from(value), Buffer.from(expected)));
 }
 
 function positive(value: unknown): number | null { return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null; }

@@ -3,6 +3,7 @@ import { escapeGitLabQuickActions, GitLabClient } from './client.ts';
 import { normalizeGitLabPath, storageKey } from '../identity.ts';
 import type { ActorAuthorization, ChangeRequestSnapshot, InboundScmComment, ScmAdapter, ScmCiState, ScmConnection, ScmDeliveryReceipt } from '../types.ts';
 import type { ReviewResult } from '../../tasks/review/result.ts';
+import { ReviewStale } from '../errors.ts';
 
 const access = { guest: 10, reporter: 20, developer: 30, maintainer: 40, owner: 50 } as const;
 function mappedAccess(value: unknown) { return typeof value === 'number' ? value : typeof value === 'string' ? access[value.toLowerCase() as keyof typeof access] ?? null : null; }
@@ -51,11 +52,20 @@ export class GitLabAdapter implements ScmAdapter {
     if (comment.connectionId !== this.connection.id || (!this.connection.projectIds.includes(String(comment.projectId)) && !this.connection.projectIds.includes(comment.repositoryPath))) {
       throw Object.assign(new Error('GitLab project is not registered on this connection'), { status: 403 });
     }
-    const [{ data: note }, authorization] = await Promise.all([this.client.note(comment.projectId, comment.changeRequestNumber, comment.remoteId), this.client.members(comment.projectId, comment.authorId)]);
+    const [{ data: note }, authorization, actor] = await Promise.all([
+      this.client.note(comment.projectId, comment.changeRequestNumber, comment.remoteId),
+      this.client.members(comment.projectId, comment.authorId),
+      this.client.userById(comment.authorId),
+    ]);
     if (String(note.id) !== String(comment.remoteId) || String(note.author?.id ?? '') !== comment.authorId || String(note.body ?? '') !== comment.body) throw Object.assign(new Error('GitLab note identity mismatch'), { status: 403 });
     const level = mappedAccess(authorization.data?.access_level ?? authorization.data?.accessLevel);
-    const can = level !== null && level >= 30 && authorization.data?.state !== 'blocked';
-    return { platform: 'gitlab', actorId: comment.authorId, checkedAt: new Date().toISOString(), accessLevel: level, source: 'project_members_all', canExecute: can, canApprove: can };
+    const user = actor.data ?? {};
+    const active = user.state === undefined || user.state === 'active';
+    const knownHuman = user.bot === false;
+    const isSelf = this.botUserId !== undefined && String(this.botUserId) === comment.authorId;
+    const can = level !== null && level >= 30 && authorization.data?.state !== 'blocked' && active && knownHuman && !isSelf;
+    return { platform: 'gitlab', actorId: comment.authorId, checkedAt: new Date().toISOString(), accessLevel: level,
+      source: 'project_members_all_and_user', canExecute: can, canApprove: can };
   }
 
   async listComments(projectId: string, number: number) {
@@ -76,7 +86,9 @@ export class GitLabAdapter implements ScmAdapter {
   async publishReview(projectId: string, number: number, headSha: string, review: ReviewResult, mentions: string[], marker: string) {
     const body = `## PatchPaw review\n\n${mentions.map(value => `@${value}`).join(' ')}\n\nHead: \`${headSha}\`\n\n${review.summary}\n\nRecommendation: **${review.recommendation}**\n\n${review.findings.map(f => `- ${f.severity}: ${f.path}:${f.line} — ${f.title}\n  ${f.evidence}`).join('\n')}\n\nLimitations: ${review.limitations.join('; ') || 'None'}\n\n${marker}`;
     const current = await this.readChangeRequest(projectId, number);
-    if (current.source.sha !== headSha) throw new Error('MR head changed before review publication');
+    if (current.state !== 'opened' || current.source.sha !== headSha) {
+      throw new ReviewStale(headSha, current.source.sha, current.state);
+    }
     return this.publishComment(projectId, number, body, [marker]);
   }
 

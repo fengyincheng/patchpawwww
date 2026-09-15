@@ -1,13 +1,12 @@
 import { readFile, readdir, rm, writeFile, rename } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import type { Octokit } from '@octokit/rest';
 import { readState, writeState, workerStatus, type RunState } from './state.ts';
 import { readPaused } from './resume.ts';
 import { readHumanReplies } from './human-feedback.ts';
 import { disposeWorkspacePath, isDisposableViewspace, runWorkspacePath } from '../workspace/repo-store.ts';
 import { prMemoryPath } from '../harness/pr-memory.ts';
 import { snapshotPRDir } from '../github/snapshot.ts';
-import { cancelOutboundDelivery, deliverImmediately, enqueueAndDeliverComment, enqueueCommentDelivery, finalizeDelivery, listOutbound, type StoredItem } from './outbound.ts';
+import { cancelOutboundDelivery, deliverImmediately, enqueueAndDeliverComment, enqueueCommentDelivery, finalizeDelivery, listOutbound, type OutboundConnection, type StoredItem } from './outbound.ts';
 import { closeCommunicationStore, openCommunicationStore } from './communication-store.ts';
 import { patchpawPaths } from '../config/paths.ts';
 import { conflictProposalDirectory } from './conflict-proposals.ts';
@@ -64,6 +63,13 @@ async function saveJournal(path: string, journal: CloseJournal) {
 export const closeStartBody = '## PatchPaw：开始清理本 PR 的本地会话\n\n已收到 `/close`。现在开始清理本 PR 在 PatchPaw 本地保存的会话记忆、相关 run 记录和工作区。\n\nGitHub PR 本身不会被关闭；共享仓库不会被删除；其他 PR 不受影响。';
 export const closeCompleteBody = '## PatchPaw：本地会话已清除\n\n本 PR 在 PatchPaw 本地保存的会话记忆、相关 run 记录和工作区已清理完成。\n\nGitHub PR 本身未关闭；共享仓库仍保留；其他 PR 未受影响。\n以后再次 @patchpawwww 时，会从新的空白本地会话开始。';
 export const closeFailedBody = (step: string) => `## PatchPaw：本地清理尚未完成\n\n\`/close\` 已开始，但本地清理在 \`${step}\` 阶段未完成。GitHub PR 未关闭，共享仓库未删除。\nPatchPaw 已保存清理进度；再次执行 \`/close\` 时应从剩余步骤继续，而不是重新创建会话或工作区。`;
+const gitLabCloseStartBody = '## PatchPaw：开始清理本地会话\n\n已收到 `/close`。现在开始清理这个 PR/MR 在 PatchPaw 本地保存的会话记忆、相关 run 记录和工作区。\n\n远端 PR/MR 本身不会被关闭；共享仓库不会被删除；其他 PR/MR 不受影响。';
+const gitLabCloseCompleteBody = '## PatchPaw：本地会话已清除\n\n这个 PR/MR 在 PatchPaw 本地保存的会话记忆、相关 run 记录和工作区已清理完成。\n\n远端 PR/MR 本身未关闭；共享仓库仍保留；其他 PR/MR 未受影响。\n以后再次 @patchpawwww 时，会从新的空白本地会话开始。';
+const gitLabCloseFailedBody = (step: string) => `## PatchPaw：本地清理尚未完成\n\n\`/close\` 已开始，但本地清理在 \`${step}\` 阶段未完成。远端 PR/MR 未关闭，共享仓库未删除。\nPatchPaw 已保存清理进度；再次执行 \`/close\` 时应从剩余步骤继续，而不是重新创建会话或工作区。`;
+function isGitLabClose(repo: string, connection?: OutboundConnection) { return Boolean(connection?.adapter?.kind === 'gitlab' || repo.startsWith('gitlab:')); }
+export function closeStartBodyFor(repo: string, connection?: OutboundConnection) { return isGitLabClose(repo, connection) ? gitLabCloseStartBody : closeStartBody; }
+export function closeCompleteBodyFor(repo: string, connection?: OutboundConnection) { return isGitLabClose(repo, connection) ? gitLabCloseCompleteBody : closeCompleteBody; }
+function closeFailedBodyFor(repo: string, connection: OutboundConnection | undefined, step: string) { return isGitLabClose(repo, connection) ? gitLabCloseFailedBody(step) : closeFailedBody(step); }
 
 // Runs are indexed by exact manifest ownership, never by path/filename heuristics.
 async function ownedRunIds(root: string, repo: string, number: number) {
@@ -122,7 +128,7 @@ async function retireConflictApprovalLifecycle(root: string, repo: string, numbe
 // This is deliberately local-only. It records the close intent, deletion inventory and
 // start notice before any installation or App metadata request is attempted.
 export async function prepareCloseStart(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string,
-  input: { comment_id: number; mentions: string[]; bot_login?: string }): Promise<ClosePreparation> {
+  input: { comment_id: number; mentions: string[]; bot_login?: string; connection?: OutboundConnection }): Promise<ClosePreparation> {
   const state = await readState(path);
   const previousJournal = await readJournal(path);
   const replies = await readHumanReplies(path);
@@ -153,7 +159,7 @@ export async function prepareCloseStart(config: { root: string; snapshotRoot: st
   // after the sender's atomic status settles.
   await retireConflictApprovalLifecycle(config.root, repo, number, path, false);
   const start = journal.start_notice_id ? undefined : await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose: 'close_start',
-    semanticKey: `close-start:${journal.close_comment_id}`, body: closeStartBody, mentions: journal.mentions,
+    semanticKey: `close-start:${journal.close_comment_id}`, body: closeStartBodyFor(repo, input.connection), mentions: journal.mentions,
     botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id, closed_through: closedThrough,
       memory_file: memoryFile, snapshot_dir: snapshots } });
   return { journal, runIds, start, closedThrough, memoryFile, snapshots };
@@ -167,12 +173,12 @@ export async function preparePendingCloseStart(config: { root: string; snapshotR
 }
 
 export async function runClose(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string,
-  input: { comment_id: number; client: Octokit; mentions: string[]; bot_login?: string }) {
+  input: { comment_id: number; connection: OutboundConnection; mentions: string[]; bot_login?: string }) {
   const state = await readState(path);
   // Defensive: routing already refuses active workers; never delete underneath a live task.
   if (workerStatus(state) === 'running' && state?.pid !== process.pid) return { status: 'close_refused_active_worker' };
 
-  const prepared = await prepareCloseStart(config, repo, number, path, input);
+  const prepared = await prepareCloseStart(config, repo, number, path, { ...input, connection: input.connection });
   const { journal, runIds, closedThrough, memoryFile, snapshots } = prepared;
 
   // C. The machine-authored start comment is the human's external audit marker and must be
@@ -181,7 +187,7 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
     try {
       if (!prepared.start) throw new Error('Close start outbox item was not prepared');
       const result = await deliverImmediately(config.root, prepared.start,
-        { client: input.client, botLogin: input.bot_login });
+        { ...input.connection, botLogin: input.bot_login ?? input.connection.botLogin });
       if (result.item.status !== 'delivered') {
         journal.last_step = 'start_notice'; journal.last_error = result.item.last_error?.name ?? result.item.status;
         await saveJournal(path, journal);
@@ -238,8 +244,8 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
       journal.last_step = step; journal.last_error = (error as Error).message;
       await saveJournal(path, journal);
       try { await enqueueAndDeliverComment({ root: config.root, repo, prNumber: number, purpose: 'close_failure',
-        semanticKey: `close-failure:${journal.close_comment_id}:${step}`, body: closeFailedBody(step), mentions: input.mentions,
-        botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id, step } }, { client: input.client, botLogin: input.bot_login }); } catch { /* durable item remains */ }
+        semanticKey: `close-failure:${journal.close_comment_id}:${step}`, body: closeFailedBodyFor(repo, input.connection, step), mentions: input.mentions,
+        botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id, step } }, { ...input.connection, botLogin: input.bot_login ?? input.connection.botLogin }); } catch { /* durable item remains */ }
       return { status: 'close_incomplete', step };
     }
   }
@@ -248,8 +254,8 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
   // published, the local close remains CLOSED with a pending notice for a later retry.
   try {
     const result = await enqueueAndDeliverComment({ root: config.root, repo, prNumber: number, purpose: 'close_completion',
-      semanticKey: `close-completion:${journal.close_comment_id}`, body: closeCompleteBody, mentions: input.mentions,
-      botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id } }, { client: input.client, botLogin: input.bot_login });
+      semanticKey: `close-completion:${journal.close_comment_id}`, body: closeCompleteBodyFor(repo, input.connection), mentions: input.mentions,
+      botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id } }, { ...input.connection, botLogin: input.bot_login ?? input.connection.botLogin });
     if (result.item.status !== 'delivered') {
       journal.status = 'completed'; journal.last_step = 'completion_notice_pending'; await saveJournal(path, journal);
       return { status: 'closed', completion_notice_status: 'pending', run_ids: journal.run_ids.length };
@@ -270,7 +276,7 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
 // notice BEFORE starting a new generation or recovery, never re-publishes the start notice, and
 // flips the durable marker to published on success. Failure keeps the pending marker for the
 // next entry; it never blocks the new generation.
-export async function retryPendingCloseCompletion(path: string, repo: string, number: number, clientOrFactory: Octokit | (() => Promise<Octokit>),
+export async function retryPendingCloseCompletion(path: string, repo: string, number: number, connectionOrFactory: OutboundConnection | (() => Promise<OutboundConnection>),
   root = dirname(dirname(dirname(path))), botLogin?: string) {
   const state = await readState(path);
   if (state?.completion_notice_status !== 'pending') return false;
@@ -278,10 +284,10 @@ export async function retryPendingCloseCompletion(path: string, repo: string, nu
     // The exact completion payload is durable before resolving an installation client. This
     // keeps a transient connection failure from losing the only owed close notice.
     const stored = await enqueueCommentDelivery({ root, repo, prNumber: number, purpose: 'close_completion',
-      semanticKey: `close-completion:${state.close_comment_id ?? state.closed_through_comment_id ?? 'unknown'}`, body: closeCompleteBody,
+      semanticKey: `close-completion:${state.close_comment_id ?? state.closed_through_comment_id ?? 'unknown'}`, body: closeCompleteBodyFor(repo),
       mentions: state.close_mentions ?? [], botLogin, source: { close_comment_id: state.close_comment_id ?? state.closed_through_comment_id ?? null } });
-    const client = typeof clientOrFactory === 'function' ? await clientOrFactory() : clientOrFactory;
-    const result = await deliverImmediately(root, stored, { client, botLogin });
+    const connection = typeof connectionOrFactory === 'function' ? await connectionOrFactory() : connectionOrFactory;
+    const result = await deliverImmediately(root, stored, { ...connection, botLogin: botLogin ?? connection.botLogin });
     if (result.item.status !== 'delivered') return false;
     await writeState(path, { ...state, completion_notice_status: 'published', completion_notice_id: result.item.receipt?.id });
     return true;
@@ -295,8 +301,8 @@ export async function retryPendingCloseCompletion(path: string, repo: string, nu
 export async function hasPendingClose(path: string) {
   return (await readJournal(path))?.status === 'closing';
 }
-export async function resumePendingClose(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string, client: Octokit, botLogin?: string) {
+export async function resumePendingClose(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string, connection: OutboundConnection, botLogin?: string) {
   const journal = await readJournal(path);
   if (!journal || journal.status !== 'closing') return undefined;
-  return runClose(config, repo, number, path, { comment_id: journal.close_comment_id, client, mentions: journal.mentions, bot_login: botLogin });
+  return runClose(config, repo, number, path, { comment_id: journal.close_comment_id, connection, mentions: journal.mentions, bot_login: botLogin });
 }

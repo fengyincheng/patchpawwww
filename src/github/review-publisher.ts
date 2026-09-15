@@ -1,12 +1,9 @@
 import type { Octokit } from '@octokit/rest';
 import type { ReviewResult } from '../tasks/review/result.ts';
 import { mentionUsers } from './comments.ts';
+import { ReviewStale } from '../scm/errors.ts';
 
-export class ReviewStale extends Error {
-  constructor(readonly expectedHead: string, readonly actualHead: string, readonly prState: string) {
-    super('PR is closed or head changed before review publication');
-  }
-}
+export { ReviewStale } from '../scm/errors.ts';
 
 export interface ReviewIdentity { runId: string; botLogin: string; allowLegacy?: boolean }
 function reviewBody(sha: string, result: ReviewResult, mentions: string[]) {

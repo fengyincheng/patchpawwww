@@ -314,7 +314,8 @@ export async function runPullRequest(config: { appId: number; privateKey: string
           { comment_id: oldest.comment_id, mentions, bot_login: botLogin });
         try {
           const { data: installation } = await github.app.rest.apps.getRepoInstallation({ owner, repo: name });
-          closeResult = await runClose(config, repo, number, path, { comment_id: oldest.comment_id, client: github.installation(installation.id),
+          closeResult = await runClose(config, repo, number, path, { comment_id: oldest.comment_id, connection: { client: github.installation(installation.id),
+            botLogin },
             mentions, bot_login: botLogin });
         } catch (error) {
           if (!prepared.start) throw error;
@@ -331,7 +332,7 @@ export async function runPullRequest(config: { appId: number; privateKey: string
       const [owner, name] = repo.split('/');
       try {
         const { data: installation } = await github.app.rest.apps.getRepoInstallation({ owner, repo: name });
-        closeResult = await resumePendingClose(config, repo, number, path, github.installation(installation.id), botLogin);
+        closeResult = await resumePendingClose(config, repo, number, path, { client: github.installation(installation.id), botLogin }, botLogin);
       } catch (error) {
         if (!prepared?.start) throw error;
         const deferred = await deferDelivery(config.root, prepared.start, error);
@@ -349,7 +350,7 @@ export async function runPullRequest(config: { appId: number; privateKey: string
           return github.installation(installation.id);
         };
         const bot = botLogin;
-        if (previous?.completion_notice_status === 'pending') await retryPendingCloseCompletion(path, repo, number, client, config.root, bot);
+        if (previous?.completion_notice_status === 'pending') await retryPendingCloseCompletion(path, repo, number, async () => ({ client: await client(), botLogin: bot }), config.root, bot);
         const refusal = (await readState(path))?.pending_close_refusal;
         if (refusal) {
           try {

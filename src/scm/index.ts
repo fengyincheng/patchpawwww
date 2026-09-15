@@ -1,4 +1,5 @@
 export * from './types.ts';
+export * from './errors.ts';
 export * from './identity.ts';
 export * from './github/adapter.ts';
 export * from './gitlab/client.ts';

@@ -30,11 +30,18 @@ test('GitLab legacy and Standard Webhooks authentication are explicit and replay
   const body = Buffer.from(JSON.stringify(payload()));
   assert.equal(verifyLegacyToken('secret', 'secret'), true);
   assert.equal(verifyLegacyToken('secret', 'other'), false);
-  const secret = 'signing-secret', id = 'msg-1', timestamp = String(Math.floor(Date.now() / 1000));
-  const digest = createHmac('sha256', secret).update(`${id}.${timestamp}.`).update(body).digest('base64');
-  assert.equal(verifyStandardSignature({ body, webhookId: id, timestamp, signature: `v1,${digest}`, secret }), true);
-  assert.equal(verifyStandardSignature({ body, webhookId: id, timestamp: String(Number(timestamp) - 301), signature: `v1,${digest}`, secret }), false);
-  assert.equal(verifyStandardSignature({ body, webhookId: id, timestamp, signature: `v1,${digest}`, secret: 'wrong' }), false);
+  const key = Buffer.alloc(32, 7), secret = `whsec_${key.toString('base64')}`;
+  const id = 'msg-1', timestamp = String(Math.floor(Date.now() / 1000));
+  const digest = createHmac('sha256', key).update(`${id}.${timestamp}.`).update(body).digest('base64');
+  const signature = `v1,${digest}`;
+  assert.equal(verifyStandardSignature({ body, webhookId: id, timestamp, signature, secret }), true);
+  assert.equal(verifyStandardSignature({ body, webhookId: id, timestamp, signature: `v1,wrong ${signature}`, secret }), true);
+  assert.equal(verifyStandardSignature({ body: Buffer.from(`${body}!`), webhookId: id, timestamp, signature, secret }), false);
+  assert.equal(verifyStandardSignature({ body, webhookId: 'other', timestamp, signature, secret }), false);
+  assert.equal(verifyStandardSignature({ body, webhookId: id, timestamp: String(Number(timestamp) - 301), signature, secret }), false);
+  assert.throws(() => verifyStandardSignature({ body, webhookId: id, timestamp, signature, secret: 'signing-secret' }), /whsec_/);
+  assert.throws(() => verifyStandardSignature({ body, webhookId: id, timestamp, signature, secret: 'whsec_not-base64!!!' }), /base64/);
+  assert.throws(() => verifyStandardSignature({ body, webhookId: id, timestamp, signature, secret: `whsec_${Buffer.alloc(31).toString('base64')}` }), /32 bytes/);
 });
 
 test('GitLab webhook route persists a normalized note under its connection storage key', async t => {

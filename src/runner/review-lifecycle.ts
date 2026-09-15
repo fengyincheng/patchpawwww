@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import type { Octokit } from '@octokit/rest';
 import { reviewResultSchema } from '../tasks/review/result.ts';
-import { ReviewStale } from '../github/review-publisher.ts';
+import { ReviewStale } from '../scm/errors.ts';
 import { Trace } from '../harness/trace.ts';
 import { writeState, type RunState } from './state.ts';
 import { deliverImmediately, enqueueReviewDelivery, OutboundPending } from './outbound.ts';

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { GitLabClient } from './client.ts';
 import { GitLabAdapter } from './adapter.ts';
 import { saveScmSnapshot } from './snapshot.ts';
@@ -36,6 +37,8 @@ import { readArtifact } from '../../runner/review-lifecycle.ts';
 import { readHumanReplies } from '../../runner/human-feedback.ts';
 import { newConflictApproval, readConflictApproval, readUnfinishedConflictApproval, saveConflictApproval, updateConflictApproval, type ConflictApprovalRecord } from '../../runner/conflict-approval.ts';
 import { createConflictProposal, markConflictProposalStatus, proposalDeliverySemanticKey, proposalPointerForState, readCurrentConflictProposal, renderConflictProposal, saveConflictProposal, saveProposalState } from '../../runner/conflict-proposals.ts';
+import { closeRefusalBody, hasPendingClose, resumePendingClose, retryPendingCloseCompletion, runClose } from '../../runner/close.ts';
+import { ReviewStale } from '../errors.ts';
 
 export interface GitLabWorkerConfig {
   root: string;
@@ -88,6 +91,32 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
   if (!resolved) throw new Error('Invalid GitLab storage key');
   const path = statePath(patchpawPaths(config.root).state, repo, number);
   if (workerStatus(await readState(path)) === 'running') return { status: 'already_running' };
+  if (await hasPendingClose(path)) {
+    const recoveryRelease = await claimRun(path);
+    if (!recoveryRelease) return { status: 'already_running' };
+    try {
+      return await resumePendingClose({ root: config.root, snapshotRoot: config.snapshotRoot }, repo, number, path,
+        { adapter: resolved.adapter, botLogin: resolved.adapter.botLogin }, resolved.adapter.botLogin);
+    } finally { await recoveryRelease(); }
+  }
+  const priorState = await readState(path);
+  if (priorState?.completion_notice_status === 'pending') {
+    await retryPendingCloseCompletion(path, repo, number, { adapter: resolved.adapter, botLogin: resolved.adapter.botLogin }, config.root, resolved.adapter.botLogin);
+  }
+  if (priorState?.pending_close_refusal) {
+    try {
+      const refusal = priorState.pending_close_refusal;
+      const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose: 'close_refusal',
+        semanticKey: `close-refusal:${refusal.comment_id}`, body: closeRefusalBody,
+        mentions: [refusal.author].filter((value): value is string => !!value), botLogin: resolved.adapter.botLogin,
+        source: { comment_id: refusal.comment_id, connection_id: resolved.connection.id, project_id: resolved.projectId } });
+      const delivered = await deliverImmediately(config.root, stored, { adapter: resolved.adapter, botLogin: resolved.adapter.botLogin });
+      if (delivered.item.status === 'delivered') {
+        const current = await readState(path);
+        if (current?.pending_close_refusal?.comment_id === refusal.comment_id) await writeState(path, { ...current, pending_close_refusal: undefined });
+      }
+    } catch { /* the refusal stays pending for the next entry or scheduler reconciliation */ }
+  }
   const approvalRecovery = await readUnfinishedConflictApproval(path) ?? undefined;
   if (!await hasHumanReplies(path) && !approvalRecovery) return { status: 'mention_required' };
   const release = await claimRun(path); if (!release) return { status: 'already_running' };
@@ -152,14 +181,27 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
       : approvalRecovery ? { kind: 'control', control: 'approval' } as const : { kind: 'conversation', repositoryId: repository.id } as const;
     const task: PRTask = intent.kind === 'command' ? intent.executionType : intent.kind === 'control' ? intent.control === 'stop' ? 'stop' : intent.control === 'close' ? 'close' : 'conflict' : 'conversation';
     if (task === 'stop') return await finish('stopped', { reason: 'GitLab /stop 只停止本地 generation。' });
-    if (task === 'close') return await finish('closed', { reason: 'GitLab /close 只清理本地会话。' });
+    if (task === 'close') {
+      if (!eventComment) return await finish('needs_human', { reason: 'GitLab /close 缺少可验证的来源评论；没有执行清理。' });
+      const mentions = [eventComment.author, config.operatorLogin, snapshot.author.login].filter((value): value is string => !!value);
+      const result = await runClose({ root: config.root, snapshotRoot: config.snapshotRoot }, repo, number, path, {
+        comment_id: eventComment.comment_id, connection: { adapter: resolved.adapter, botLogin: resolved.adapter.botLogin }, mentions,
+        bot_login: resolved.adapter.botLogin,
+      });
+      // The GitLab worker creates its trace directory before it can identify a mechanical close.
+      // The close journal owns the actual generation artifacts; remove this empty dispatcher run
+      // after the lifecycle has durably completed or recorded its next retry step.
+      await rm(runDir(config, runId), { recursive: true, force: true });
+      return result;
+    }
     const approvalRequested = task === 'conflict' && intent.kind === 'control' && intent.control === 'approval';
     await ensureRepo(config.root, repo, snapshot.repository.cloneUrl, trace);
     const token = await resolved.adapter.installationGitToken!();
     trace.secret(token); trace.secret(Buffer.from(`x-access-token:${token}`).toString('base64'));
     resolved.adapter.client.assertRemoteUrl(snapshot.repository.cloneUrl);
     if (snapshot.source.cloneUrl) resolved.adapter.client.assertRemoteUrl(snapshot.source.cloneUrl);
-    const fetched = await fetchPRState(config.root, repo, { headSha: snapshot.source.sha, baseRef: snapshot.target.ref, sourceRemoteUrl: snapshot.source.cloneUrl }, trace, gitAuth(token, snapshot.repository.cloneUrl));
+    const fetched = await fetchPRState(config.root, repo, { headSha: snapshot.source.sha, baseRef: snapshot.target.ref, sourceRemoteUrl: snapshot.source.cloneUrl }, trace,
+      gitAuth(token, snapshot.repository.cloneUrl, 'x-access-token', resolved.connection.instanceUrl));
     const currentBase = { ref: fetched.baseRef, sha: fetched.currentBaseTipSha };
     currentBaseForResume = currentBase;
     const retained = await readPaused(path);
@@ -317,8 +359,18 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
     };
     const watcher = watchStop(path, botLogin, () => state.handled_comment_ids ?? [], async comment => {
       state.handled_comment_ids = [...new Set([...(state.handled_comment_ids ?? []), comment.comment_id])];
+      if (!state.pending_close_refusal) state.pending_close_refusal = { comment_id: comment.comment_id, author: comment.author };
       await writeState(path, state);
-      await publishComment('close_refusal', `close-refusal:${comment.comment_id}`, 'GitLab /close 只清理本地会话；当前任务仍在运行，未关闭远端 MR。');
+      try {
+        const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose: 'close_refusal', body: closeRefusalBody,
+          semanticKey: `close-refusal:${comment.comment_id}`, mentions: [comment.author], botLogin,
+          source: { run_id: runId, connection_id: resolved.connection.id, project_id: resolved.projectId, head_sha: state.current_head_sha } });
+        const delivered = await deliverImmediately(config.root, stored, { adapter: resolved.adapter, botLogin });
+        if (delivered.item.status === 'delivered') {
+          state.pending_close_refusal = undefined;
+          await writeState(path, state);
+        }
+      } catch (error) { trace.emit('close_refusal_notice_pending', { comment_id: comment.comment_id, message: (error as Error).message }); }
     });
     stopWatcher = watcher;
     const taskOptions = { task, prompt: '', ws: workspace, trace, runId, currentBase, execution: runtime,
@@ -333,7 +385,8 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
       if (before.source.sha !== startHead || String(beforeBranch.data.commit?.id ?? beforeBranch.data.commit?.sha ?? '') !== currentBase.sha) throw new Error('GitLab MR head or target branch changed before push');
       const sha = await commitRepair(workspace!, kind, trace, startHead);
       state.current_head_sha = sha; state.last_patchpaw_commit = sha; await writeState(path, state); state.phase = 'publishing'; await writeState(path, state);
-      await git(workspace!.path, ['push', 'origin', `HEAD:refs/heads/${snapshot.source.ref}`], trace, gitAuth(token, snapshot.repository.cloneUrl));
+      await git(workspace!.path, ['push', 'origin', `HEAD:refs/heads/${snapshot.source.ref}`], trace,
+        gitAuth(token, snapshot.repository.cloneUrl, 'x-access-token', resolved.connection.instanceUrl));
       const deadline = Date.now() + 30_000;
       for (;;) {
         const current = await resolved.adapter.readChangeRequest(resolved.projectId, number);
@@ -369,7 +422,15 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
       const review = await runReview(taskOptions, await seed()); trace.save('review.json', { head_sha: snapshot.source.sha, ...review });
       const stored = await enqueueReviewDelivery({ root: config.root, repo, prNumber: number, semanticKey: `review:${runId}:${snapshot.source.sha}`, headSha: snapshot.source.sha, review, mentions, botLogin, runId,
         source: { run_id: runId, connection_id: resolved.connection.id, project_id: resolved.projectId, head_sha: snapshot.source.sha } });
-      const publication = await deliverImmediately(config.root, stored, { adapter: resolved.adapter, botLogin });
+      let publication;
+      try {
+        publication = await deliverImmediately(config.root, stored, { adapter: resolved.adapter, botLogin });
+      } catch (error) {
+        if (!(error instanceof ReviewStale)) throw error;
+        trace.save('review-stale.json', { expected_head: error.expectedHead, actual_head: error.actualHead, pr_state: error.prState });
+        await finalizeDelivery(config.root, stored);
+        return await finish('review_stale', { expected_head: error.expectedHead, actual_head: error.actualHead, pr_state: error.prState });
+      }
       return await finishPublication(publication, 'review_completed', { review });
     }
     if (task === 'custom') {

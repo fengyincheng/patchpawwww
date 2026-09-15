@@ -32,11 +32,20 @@ export async function git(cwd: string, args: string[], trace?: Trace, env?: Node
   if (result.exitCode !== 0 && !allowFailure) throw new Error(`Git command failed: ${args[0]} (exit ${result.exitCode})`);
   return result;
 }
-export function gitAuth(token: string, remoteUrl = 'https://github.com', username = 'x-access-token'): NodeJS.ProcessEnv {
+export function gitAuth(token: string, remoteUrl = 'https://github.com', username = 'x-access-token', scopeUrl?: string): NodeJS.ProcessEnv {
   const origin = new URL(remoteUrl);
   if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash) throw new Error('Git remote URL is unsafe for authenticated transport');
-  const host = `${origin.protocol}//${origin.host}`;
+  let scope = `${origin.protocol}//${origin.host}`;
+  if (scopeUrl) {
+    const candidate = new URL(scopeUrl);
+    if (!['http:', 'https:'].includes(candidate.protocol) || candidate.origin !== origin.origin || candidate.username || candidate.password || candidate.search || candidate.hash) {
+      throw new Error('Git credential scope crossed the remote origin');
+    }
+    const path = candidate.pathname.replace(/\/+$/, '');
+    if (path && origin.pathname !== path && !origin.pathname.startsWith(`${path}/`)) throw new Error('Git credential scope does not contain the remote URL');
+    scope += path;
+  }
   return { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_COUNT: '1',
-    GIT_CONFIG_KEY_0: `http.${host}/.extraheader`,
+    GIT_CONFIG_KEY_0: `http.${scope}/.extraheader`,
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`${username}:${token}`).toString('base64')}` };
 }

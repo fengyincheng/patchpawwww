@@ -131,6 +131,7 @@ export class GitLabClient {
   projectPath(projectId: string | number) { return `/projects/${encodeProjectId(projectId)}`; }
   project(projectId: string | number) { return this.get<Record<string, any>>(this.projectPath(projectId)); }
   user() { return this.get<Record<string, any>>('/user'); }
+  userById(userId: string | number) { return this.get<Record<string, any>>(`/users/${encodeProjectId(userId)}`); }
   mergeRequest(projectId: string | number, iid: number) { return this.get<Record<string, any>>(`${this.projectPath(projectId)}/merge_requests/${iid}`); }
   note(projectId: string | number, iid: number, noteId: number) { return this.get<Record<string, any>>(`${this.projectPath(projectId)}/merge_requests/${iid}/notes/${noteId}`); }
   notes(projectId: string | number, iid: number, params: Record<string, string | number | boolean | undefined> = {}) { return this.all<Record<string, any>>(`${this.projectPath(projectId)}/merge_requests/${iid}/notes`, params); }
