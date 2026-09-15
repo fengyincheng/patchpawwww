@@ -27,12 +27,15 @@ PatchPaw 不提供域名、服务器或模型额度。它会执行仓库代码�
 | --- | --- |
 | 浏览器控制台 | `https://patchpaw.example.com/` |
 | GitHub App Webhook | `https://patchpaw.example.com/github/webhook` |
+| GitLab Webhook | `https://patchpaw.example.com/gitlab/webhook/<connection-id>` |
 | 公开部署信息 | `https://patchpaw.example.com/api/setup` |
 | 健康检查 | `https://patchpaw.example.com/health` |
 
 **前端、API 和 Webhook 共用同一个域名和后端进程。** 不需要另一个前端域名或独立前端服务。`PATCHPAW_PUBLIC_ORIGIN` 填 `https://patchpaw.example.com`，不要加子路径或 `/github/webhook`。这个变量声明公开地址，不会自动配置 DNS、证书或监听端口。
 
 ## 2. 创建并安装 GitHub App
+
+> **使用 GitLab？** PatchPaw 已支持 **GitLab.com** 和 **GitLab Self-Managed**。如果你只接 GitLab，不需要注册 GitHub App，直接跳到 [GitLab 从零接入教程](docs/GITLAB.md)。教程会从 Bot/Service Account、PAT、Project ID、Webhook 一直带到第一条 MR 评论和读写命令。GitHub 与 GitLab 也可以在同一 PatchPaw 实例中共存。
 
 在个人或组织的 **Settings → Developer settings → GitHub Apps → New GitHub App** 创建。个人账号可从 [GitHub App 设置](https://github.com/settings/apps) 进入。
 
@@ -259,7 +262,7 @@ Webhook 返回 `202 verification_pending` 表示已入队，还需确认机器�
 
 命令名为 1–32 个字符，小写字母开头，仅含小写字母、数字、连字符；不要占用 `stop`、`close`、`approval`、`approve`、`confict` 等保留名称。启用的命令至少要有一个启用的 main Prompt。公共资产需要先成为该仓库可绑定的资产；仅创建 Prompt/Skill 不会自动使其参与命令。
 
-**custom 只使用你选定的 Prompt/Skill，不会继承 Review、CI 或 Conflict 的内置指令。** 对 GitLab 命令，切成 read_write 后 Agent 可以修改并正常 commit workspace；提交、非强制 push、远端 MR head 确认和最终 Note 发布由 Harness 负责，Agent 不能自行 push。read_write 仍不等于自动获得 CI 修复流程；需要其他内置流程时选择相应执行类型。权限要在配置中设置，不能只靠 Prompt 里写“只读”。普通对话有独立配置，修改某个命令不会同时更改普通对话。
+**custom 只使用你选定的 Prompt/Skill，不会继承 Review、CI 或 Conflict 的内置指令。** 对 GitLab 命令，切成 read_write 后 Agent 可以修改 workspace，也允许在 workspace 内自行 commit；如果 Agent 已完整 commit，Harness 不会重复提交，如果仍有未提交修改，Harness 会自动收口为 commit。Agent 不能自行 push；非强制 push、远端 MR head 确认和最终 Note 发布由 Harness 负责。read_write 仍不等于自动获得 CI 修复流程；需要其他内置流程时选择相应执行类型。权限要在配置中设置，不能只靠 Prompt 里写“只读”。普通对话有独立配置，修改某个命令不会同时更改普通对话。
 
 运行时会固定本次生效配置快照；编辑控制台不会把已启动任务的指令中途替换。恢复旧执行时可能沿用其原始快照。
 

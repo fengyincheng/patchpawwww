@@ -2,7 +2,7 @@
 
 A self-hosted GitHub App / GitLab integration for Pull Request and Merge Request conversations, code reviews, CI reads and conflict analysis, with a web console for repositories, models, prompts, skills, commands and SCM connections.
 
-[中文](README.md) · [GitLab setup](docs/GITLAB.md) · [Operations](docs/OPERATIONS.md) · [Security model](docs/SECURITY-MODEL.md) · [Contributing](CONTRIBUTING.md)
+[中文](README.md) · [GitLab setup](docs/GITLAB.en.md) · [Operations](docs/OPERATIONS.md) · [Security model](docs/SECURITY-MODEL.md) · [Contributing](CONTRIBUTING.md)
 
 This is an early release for operators comfortable maintaining their own deployment. Linux and macOS are supported; Linux is recommended for production. **Native Windows is not currently supported. No official Docker image is available. A Linux container image usable through Docker on Windows may be considered in the future; there is no release date.**
 
@@ -13,7 +13,7 @@ Quick navigation: [Setup](#prerequisites) · [Commands](#everyday-commands) · [
 - A persistent Linux host or macOS, Node.js **22.x, version 22.22.0 or newer**, npm and Git.
 - A domain or subdomain you control, with DNS and an HTTPS reverse proxy.
 - Permission to register a GitHub App and install it on your target repositories.
-- Or a GitLab Personal/Project Access Token with access to the target projects. GitLab.com and self-managed instances are supported; see [GitLab setup](docs/GITLAB.md).
+- Or a GitLab Personal/Project Access Token with access to the target projects. GitLab.com and self-managed instances are supported; see the [step-by-step GitLab setup guide](docs/GITLAB.en.md).
 - A model API credential. Supported provider types: Zhipu/Z.ai, DeepSeek, OpenRouter, Kimi and Qwen. Check model availability, endpoints, costs and data policies yourself.
 - The target repository's toolchain, such as Python, compilers or package managers. PatchPaw does not provision every project's dependencies.
 
@@ -27,12 +27,15 @@ For `https://patchpaw.example.com`:
 | --- | --- |
 | Web console | `https://patchpaw.example.com/` |
 | GitHub App webhook | `https://patchpaw.example.com/github/webhook` |
+| GitLab webhook | `https://patchpaw.example.com/gitlab/webhook/<connection-id>` |
 | Public setup information | `https://patchpaw.example.com/api/setup` |
 | Health endpoint | `https://patchpaw.example.com/health` |
 
 **The frontend, API and webhook share one domain and server process.** There is no separate frontend server to deploy. Set `PATCHPAW_PUBLIC_ORIGIN=https://patchpaw.example.com`, without a subpath or webhook suffix. This declares the public origin; it does not configure DNS, certificates or network bindings.
 
 ## 2. Register and install your GitHub App
+
+> **Using GitLab instead?** PatchPaw supports **GitLab.com** and **GitLab Self-Managed**. A GitLab-only deployment does not need a GitHub App. Skip this section and follow the [GitLab setup guide](docs/GITLAB.en.md), which walks through the bot/service account, token, numeric Project ID, webhook, first MR comment, and read/write commands. GitHub and GitLab can also coexist in one PatchPaw instance.
 
 Open your personal or organization **Settings → Developer settings → GitHub Apps → New GitHub App**. For personal accounts, start at [GitHub App settings](https://github.com/settings/apps).
 
@@ -86,7 +89,7 @@ An initial ping may fail before the server is running. Check deliveries after de
 
 ## 3. Install and configure
 
-For a GitLab-only deployment, skip the GitHub App registration section and follow [GitLab setup](docs/GITLAB.md) for `PATCHPAW_GITLAB_CONNECTIONS`. GitHub and GitLab connections can run in the same process.
+For a GitLab-only deployment, skip the GitHub App registration section and follow the [GitLab setup guide](docs/GITLAB.en.md) for `PATCHPAW_GITLAB_CONNECTIONS`. GitHub and GitLab connections can run in the same process.
 
 Run as the account that will run the service:
 
@@ -245,7 +248,7 @@ Do not modify files or commit code.
 
 Names must start with a lowercase letter and contain only lowercase letters, digits and hyphens, up to 32 characters. Reserved names include stop, close, approval, approve and confict. Enabled commands require at least one enabled main prompt. Public assets must first be available as repository-bindable assets; creating a prompt or skill alone does not attach it to a command.
 
-**Custom commands use only the selected prompt/skill stack, without inheriting Review, CI or Conflict instructions.** For GitLab commands, read_write lets the Agent edit and normally commit the workspace; the Harness owns the commit, non-force push, remote MR-head confirmation, and final Note publication, and blocks Agent-authored pushes. read_write still does not add the built-in CI repair workflow; choose the appropriate execution type when that flow is needed. Set permissions in configuration, not just in prompt wording. Conversations have a separate profile.
+**Custom commands use only the selected prompt/skill stack, without inheriting Review, CI or Conflict instructions.** For GitLab commands, read_write lets the Agent edit the workspace and it may also create local commits. If the Agent already committed a clean candidate, the Harness does not create a duplicate commit; if uncommitted changes remain, the Harness commits them before writeback. Agent-authored push is blocked: the Harness owns the non-force push, remote MR-head confirmation, and final Note publication. read_write still does not add the built-in CI repair workflow; choose the appropriate execution type when that flow is needed. Set permissions in configuration, not just in prompt wording. Conversations have a separate profile.
 
 Each execution fixes its effective configuration snapshot. Editing the console does not replace instructions mid-run, and resuming an earlier execution may retain its original snapshot.
 
