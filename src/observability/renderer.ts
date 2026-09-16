@@ -88,6 +88,7 @@ function summaryLines(summary: RunSummary) {
     `Execution  ${summary.executionId ?? 'unknown'}`,
     `Worker     ${summary.worker}`,
     `Phase      ${boundedText(summary.phase ?? 'unknown')}`,
+    `Task       ${boundedText(summary.task ?? 'unknown')}`,
     `Status     ${boundedText(summary.status)}`,
     `Current    ${boundedText(summary.currentActivity)}`,
     `Started    ${boundedText(summary.startedAt ?? 'unknown')}`,
@@ -128,9 +129,10 @@ function resultProjection(result: Record<string, unknown>) {
 }
 
 export function renderSummary(summary: RunSummary, mode: RenderMode = 'readable') {
-  if (mode === 'json') return cleanJson(bounded({ ...summary, result: summary.result ? resultProjection(summary.result) : undefined }));
-  if (mode === 'compact') return `${boundedText(summary.runId)} ${boundedText(summary.status)} phase=${boundedText(summary.phase ?? 'unknown')} current=${boundedText(summary.currentActivity)} tools=${summary.tools} errors=${summary.errors}`;
-  return summaryLines(summary).join('\n');
+  const safe = redactValue(summary) as RunSummary;
+  if (mode === 'json') return cleanJson(bounded({ ...safe, result: safe.result ? resultProjection(safe.result) : undefined }));
+  if (mode === 'compact') return `${boundedText(safe.runId)} ${boundedText(safe.status)} phase=${boundedText(safe.phase ?? 'unknown')} current=${boundedText(safe.currentActivity)} tools=${safe.tools} errors=${safe.errors}`;
+  return summaryLines(safe).join('\n');
 }
 
 export function renderObserverHeader(runId: string, mode: RenderMode = 'readable') {

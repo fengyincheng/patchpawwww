@@ -44,6 +44,11 @@ function detailText(event: ObservableEvent, key: string) {
   return typeof value === 'string' ? value : undefined;
 }
 
+function detailIdentifier(event: ObservableEvent, key: string) {
+  const value = event.detail?.[key];
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+}
+
 function detailNumber(event: ObservableEvent, key: string) {
   const value = event.detail?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -82,7 +87,7 @@ export function summarizeRun(input: RunSummaryInput): RunSummary {
     summary.executionId = event.executionId ?? summary.executionId;
     lastTitle = event.title;
     const source = event.sourceEvent ?? '';
-    const request = detailText(event, 'request');
+    const request = detailIdentifier(event, 'request');
     const index = detailIndex(event);
     if (source === 'phase' && detailText(event, 'phase')) summary.phase = detailText(event, 'phase');
     if (source === 'task_turn_start' || source === 'task_turn_end' || source === 'repair_started') summary.task = detailText(event, 'task') ?? summary.task;
