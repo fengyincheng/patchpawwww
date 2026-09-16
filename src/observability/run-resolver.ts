@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { patchpawPaths } from '../config/paths.ts';
+import { configuredRuntimeHome, patchpawPaths } from '../config/paths.ts';
 import { readState, statePath, workerStatus, type RunState } from '../runner/state.ts';
 import { readStateForRun } from './run-reader.ts';
 
@@ -76,7 +76,7 @@ async function loadResolvedRun(runtimeHome: string, runId: string, state: RunSta
   const manifestPath = join(dir, 'manifest.json');
   let manifest: RunManifest | null;
   try { manifest = await readObject(manifestPath, false); }
-  catch (error) { throw new RunResolutionError('manifest_mismatch', `Run manifest is unreadable for ${runId}: ${error instanceof Error ? error.message : String(error)}`); }
+  catch { throw new RunResolutionError('manifest_mismatch', `Run manifest is unreadable for ${runId}.`); }
   if (!manifest) throw new RunResolutionError('manifest_mismatch', `Run manifest is missing for ${runId}.`);
   if (manifest.run_id !== runId) throw new RunResolutionError('manifest_mismatch', `Run manifest does not identify ${runId}.`);
   if (expected && !manifestMatches(manifest, expected.repo, expected.changeNumber)) {
@@ -89,11 +89,12 @@ async function loadResolvedRun(runtimeHome: string, runId: string, state: RunSta
 
 function targetValid(repo: string, changeNumber: number) {
   return /^(?:gitlab:[A-Za-z0-9][A-Za-z0-9_.:-]*:project:[^/]+|[\w.-]+(?:\/[\w.-]+)+)$/.test(repo)
+    && !repo.split('/').some(part => part === '.' || part === '..')
     && Number.isSafeInteger(changeNumber) && changeNumber > 0;
 }
 
-export async function listRunManifests(runtimeHome = process.env.PATCHPAW_HOME): Promise<ListedRun[]> {
-  const runs = patchpawPaths(runtimeHome).runs;
+export async function listRunManifests(runtimeHome?: string): Promise<ListedRun[]> {
+  const runs = patchpawPaths(configuredRuntimeHome(runtimeHome)).runs;
   let entries;
   try { entries = await readdir(runs, { withFileTypes: true }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
@@ -103,6 +104,7 @@ export async function listRunManifests(runtimeHome = process.env.PATCHPAW_HOME):
     try {
       const manifest = await readObject(manifestPath, false);
       if (!manifest) throw new Error('Run manifest is missing');
+      if (manifest.run_id !== entry.name) throw new Error('Run manifest id does not match its directory');
       const result = await readObject(join(runs, entry.name, 'result.json'), true);
       listed.push({ runId: typeof manifest.run_id === 'string' ? manifest.run_id : undefined, manifest, result, manifestPath,
         startedAt: typeof manifest.started_at === 'string' ? manifest.started_at : undefined });
@@ -114,7 +116,7 @@ export async function listRunManifests(runtimeHome = process.env.PATCHPAW_HOME):
 }
 
 export async function resolveRun(target: RunTarget): Promise<ResolvedRun> {
-  const runtimeHome = target.runtimeHome ?? process.env.PATCHPAW_HOME;
+  const runtimeHome = configuredRuntimeHome(target.runtimeHome);
   const paths = patchpawPaths(runtimeHome);
   if (target.runId !== undefined) return loadResolvedRun(paths.home, target.runId, await readStateForRun(paths.home, target.runId), 'run');
   if (target.repo === undefined || target.changeNumber === undefined || !targetValid(target.repo, target.changeNumber)) {
@@ -124,10 +126,10 @@ export async function resolveRun(target: RunTarget): Promise<ResolvedRun> {
   let state: RunState | null = null;
   try { state = await readState(stateFile); }
   catch { /* A corrupt shortcut state is recoverable by scanning manifests below. */ }
-  if (state?.run_id) {
+  if (typeof state?.run_id === 'string' && state.run_id) {
     try { return await loadResolvedRun(paths.home, state.run_id, state, 'state', { repo: target.repo, changeNumber: target.changeNumber }); }
     catch (error) {
-      if (!(error instanceof RunResolutionError) || error.code !== 'manifest_mismatch') throw error;
+      if (!(error instanceof RunResolutionError) || !['manifest_mismatch', 'invalid_run_id'].includes(error.code)) throw error;
     }
   }
   const listed = await listRunManifests(paths.home);

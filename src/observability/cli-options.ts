@@ -24,11 +24,16 @@ export function parseTargetCommandArgs(args: string[], command: string): TargetC
   const positionals: string[] = [];
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (arg === '--run') runId = args[++index];
+    if (arg === '--run') {
+      const value = args[++index];
+      if (!value || value.startsWith('-')) throw new Error('--run requires a run identifier.');
+      runId = value;
+    }
     else if (arg === '--replay') {
       const raw = args[++index];
-      if (!/^\d+$/.test(raw ?? '')) throw new Error('--replay requires a non-negative integer.');
-      replay = Number(raw);
+      const value = Number(raw);
+      if (!/^\d+$/.test(raw ?? '') || !Number.isSafeInteger(value)) throw new Error('--replay requires a non-negative safe integer.');
+      replay = value;
     } else if (arg === '--all') replay = 'all';
     else if (arg === '--compact') mode = modeFor(mode, 'compact');
     else if (arg === '--verbose') mode = modeFor(mode, 'verbose');
@@ -57,8 +62,9 @@ export function parseRunsArgs(args: string[]) {
     else if (arg === '--include-corrupt') includeCorrupt = true;
     else if (arg === '--limit') {
       const raw = args[++index];
-      if (!/^\d+$/.test(raw ?? '') || Number(raw) < 1) throw new Error('--limit requires a positive integer.');
-      limit = Number(raw);
+      const value = Number(raw);
+      if (!/^\d+$/.test(raw ?? '') || !Number.isSafeInteger(value) || value < 1) throw new Error('--limit requires a positive safe integer.');
+      limit = value;
     } else if (arg === '--repo') {
       repo = args[++index];
       if (!repo || repo.startsWith('-')) throw new Error('--repo requires a repository name.');

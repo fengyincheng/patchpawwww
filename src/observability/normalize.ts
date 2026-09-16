@@ -23,7 +23,7 @@ const TOOL_EVENTS = new Set(['tool_start', 'tool_end']);
 const GIT_EVENTS = new Set(['git', 'repair_commit', 'repair_push', 'repair_push_confirmed', 'conflict_repair_push_confirmed', 'gitlab_conflict_repair_push_confirmed']);
 const VALIDATION_EVENTS = new Set(['validation', 'repair_verification', 'repair_verification_requested', 'ci_poll', 'ci_observation_wait', 'ci_observation_complete', 'ci_failure_evidence']);
 const WORKSPACE_EVENTS = new Set(['workspace_change', 'workspace_evidence_captured', 'workspace_disposed', 'workspace_resumed', 'worktree_created',
-  'repo_cache_initialized', 'repo_cache_fetched', 'repo_cache_remote_added', 'repo_cache_remote_updated']);
+  'workspace_path_disposed', 'stale_workspace_disposed', 'repo_cache_initialized', 'repo_cache_fetched', 'repo_cache_remote_added', 'repo_cache_remote_updated']);
 const ERROR_EVENTS = new Set(['provider_error', 'run_error', 'human_stop_closeout_failed', 'workspace_dispose_failed', 'workspace_retain_failed',
   'stale_workspace_dispose_failed', 'superseded_workspace_dispose_failed', 'repair_closeout_error']);
 const RESULT_EVENTS = new Set(['execution_completed', 'execution_paused', 'budget_exhausted', 'task_closeout_submitted', 'conversation_reply_published', 'review_published', 'repair_closeout_started']);
@@ -84,7 +84,7 @@ function selectedDetail(event: string, source: RawTraceEvent) {
 
 function explicitThinking(source: RawTraceEvent) {
   for (const key of ['reasoning', 'thinking', 'reasoning_content', 'reasoning_summary']) {
-    if (source[key] !== undefined) return detail(source, [key]);
+    if (source[key] !== undefined && source[key] !== null) return detail(source, [key]);
   }
   return undefined;
 }
