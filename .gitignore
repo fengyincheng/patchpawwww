@@ -20,6 +20,11 @@ docs/*HANDOFF*.md
 docs/GITLAB-IMPLEMENTATION-PLAN.md
 docs/GITLAB-IMPLEMENTATION-PROGRESS.md
 
-# Trellis：公开仓库下，个人会话日志与任务规划不外发
-.trellis/workspace/
-.trellis/tasks/
+# Trellis：整套本地化。内容为机器生成（trellis update 可重新生成），
+# 且属于本地 AI 工作流配置，不进公开仓库。
+.trellis/
+.claude/
+.codex/
+.agents/
+AGENTS.md
+.gitattributes
