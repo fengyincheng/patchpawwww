@@ -1,6 +1,7 @@
 import { mkdirSync, appendFileSync, writeFileSync, renameSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { cleanJson } from '../observability/redaction.ts';
 
 // Bounded diagnostic facts for large payloads: the durable trace keeps an excerpt, the exact
 // size and a fingerprint — never repeated multi-megabyte blobs. Full payloads belong to
@@ -18,12 +19,7 @@ export class Trace {
   constructor(readonly dir: string) { mkdirSync(dir, { recursive: true }); }
   secret(value: string) { if (value) this.secrets.add(value); }
   clean(value: unknown): string {
-    return JSON.stringify(value, (_key, v) => {
-      if (typeof v === 'bigint') return String(v);
-      if (typeof v !== 'string') return v;
-      for (const secret of this.secrets) v = v.split(secret).join('[REDACTED]');
-      return v.replace(/(?:ghs|ghp|github_pat)_[A-Za-z0-9_]+/g, '[REDACTED]');
-    }) ?? 'null';
+    return cleanJson(value, this.secrets);
   }
   emit(event: string, data: object = {}) {
     appendFileSync(join(this.dir, 'trace.jsonl'), this.clean({ time: new Date().toISOString(), event, execution_id: this.executionId, ...data }) + '\n');

@@ -381,7 +381,7 @@ async function runGitLabMergeRequestWithConnection(config: GitLabWorkerConfig, r
     const execution = approvalSnapshot ? { snapshot: approvalSnapshot }
       : await resolveExecution(controlPlane, task === 'conversation' ? { kind: 'conversation', repositoryId: repository.id, executionId: `${runId}:1` } : intent.kind === 'command' ? { kind: 'command', repositoryId: repository.id, commandId: intent.commandId, executionId: `${runId}:1` } : { kind: 'conversation', repositoryId: repository.id, executionId: `${runId}:1` });
     const runtime = runtimeExecutionFromSnapshot(execution.snapshot, config.root); const snapshotRef = await writeCommandSnapshot(config.root, runId, execution.snapshot);
-    trace.save('manifest.json', { run_id: runId, repo, pr_number: number, scm: 'gitlab', scm_connection_id: resolved.connection.id, project_id: resolved.projectId,
+    trace.save('manifest.json', { run_id: runId, repo, repository: snapshot.repository.pathWithNamespace, pr_number: number, scm: 'gitlab', scm_connection_id: resolved.connection.id, project_id: resolved.projectId,
       initial_head_sha: snapshot.source.sha, base_sha: snapshot.diffBaseSha, current_base_ref: currentBase.ref, current_base_tip_sha: currentBase.sha, pr_thread_id: prThreadId(repo, number), workspace_path: workspacePath,
       snapshot_path: snapshotRef.snapshot_path, snapshot_id: snapshotRef.snapshot_id, snapshot_sha256: snapshotRef.snapshot_sha256, request_author: triggering?.author });
     const fake = fakePullRequest(snapshot);
