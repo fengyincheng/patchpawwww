@@ -13,3 +13,13 @@ docs/_handoff/
 /secrets/
 var/
 /web/dist/
+
+# 内部交接/返工文档：不进公开仓库
+docs/*HANDOFF*.md
+# 以下两份原已提交并推送，现改为仅内部保留（本地文件保留，不再跟踪）
+docs/GITLAB-IMPLEMENTATION-PLAN.md
+docs/GITLAB-IMPLEMENTATION-PROGRESS.md
+
+# Trellis：公开仓库下，个人会话日志与任务规划不外发
+.trellis/workspace/
+.trellis/tasks/
