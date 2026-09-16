@@ -507,14 +507,23 @@ test('GitLab provider failure publishes a classified durable MR Note', async t =
   assert.equal((result as any).failure.upstream_status, 429);
   assert.equal((result as any).failure.attempts, 4);
   assert.equal((result as any).notification.status, 'published');
+  assert.equal((await readState(fixture.path))?.phase, 'provider_unavailable');
   const runResult = JSON.parse(await readFile(join(fixture.root, 'runs', (result as any).run_id, 'result.json'), 'utf8'));
   assert.equal(runResult.status, 'provider_unavailable');
+  assert.equal(runResult.failed_phase, 'repair');
   assert.equal(runResult.failure.code, 'provider_upstream_unavailable');
   assert.equal(runResult.notification.status, 'published');
+  const runNotice = JSON.parse(await readFile(join(fixture.root, 'runs', (result as any).run_id, 'run-notice.json'), 'utf8'));
+  assert.equal(runNotice.phase, 'repair');
   const trace = await readFile(join(fixture.root, 'runs', (result as any).run_id, 'trace.jsonl'), 'utf8');
   assert.match(trace, /"event":"run_error"/);
+  const events = trace.trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(events.some(event => event.event === 'run_notice_published'));
+  assert.equal(events.filter(event => event.event === 'run_notice_pending').length, 0);
   const notice = fixture.control.remoteNotes.find(note => note.author.id === 900 && note.body.includes('模型服务暂时不可用'));
   assert.ok(notice);
+  assert.match(notice.body, /阶段：`repair`/);
+  assert.match(notice.body, /状态：`provider_unavailable`/);
   assert.match(notice.body, /provider_upstream_unavailable/);
   assert.match(notice.body, /HTTP 429/);
   assert.match(notice.body, /稍后重新发送原命令/);
@@ -530,6 +539,13 @@ test('GitLab failure Note publication keeps the primary failure and does not rer
   assert.equal(result?.status, 'provider_unavailable');
   assert.equal((result as any).failure.code, 'provider_upstream_unavailable');
   assert.equal((result as any).notification.status, 'blocked');
+  assert.equal((await readState(fixture.path))?.phase, 'provider_unavailable');
+  const runDir = join(fixture.root, 'runs', (result as any).run_id);
+  assert.equal(JSON.parse(await readFile(join(runDir, 'result.json'), 'utf8')).failed_phase, 'repair');
+  assert.equal(JSON.parse(await readFile(join(runDir, 'run-notice.json'), 'utf8')).phase, 'repair');
+  const events = (await readFile(join(runDir, 'trace.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(events.some(event => event.event === 'run_notice_pending'));
+  assert.equal(events.filter(event => event.event === 'run_notice_published').length, 0);
   const modelCalls = fixture.control.modelCalls;
   const stored = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice');
   assert.ok(stored); assert.equal(stored!.item.status, 'blocked');
@@ -548,12 +564,12 @@ test('GitLab failure Note publication keeps the primary failure and does not rer
 
 test('GitLab connection bootstrap failures persist terminal evidence', async t => {
   const cases: Array<{ name: string; setup: (fixture: WorkerFixture) => void; expected: string; targetRepo?: string }> = [
-    { name: 'missing token', setup: fixture => { (fixture.config.gitlabConnections[0]! as { token?: string }).token = undefined; }, expected: 'gitlab_auth_failed' },
+    { name: 'missing token', setup: fixture => { (fixture.config.gitlabConnections[0]! as { token?: string }).token = undefined; }, expected: 'gitlab_configuration_error' },
     { name: 'GitLab user auth failure', setup: fixture => { fixture.control.userFailure = { status: 401 }; }, expected: 'gitlab_auth_failed' },
     { name: 'GitLab user network failure', setup: fixture => { fixture.control.userFailure = 'network'; }, expected: 'gitlab_unavailable' },
-    { name: 'bot identity unavailable', setup: fixture => { fixture.control.botIdentity = { id: 900, username: '' }; }, expected: 'gitlab_auth_failed' },
-    { name: 'stale bot identity', setup: fixture => { fixture.config.gitlabConnections[0]!.botUserId = '901'; }, expected: 'gitlab_auth_failed' },
-    { name: 'invalid storage key', setup: () => {}, expected: 'gitlab_auth_failed', targetRepo: 'gitlab:invalid' },
+    { name: 'bot identity unavailable', setup: fixture => { fixture.control.botIdentity = { id: 900, username: '' }; }, expected: 'gitlab_configuration_error' },
+    { name: 'stale bot identity', setup: fixture => { fixture.config.gitlabConnections[0]!.botUserId = '901'; }, expected: 'gitlab_configuration_error' },
+    { name: 'invalid storage key', setup: () => {}, expected: 'gitlab_configuration_error', targetRepo: 'gitlab:invalid' },
   ];
   for (const testCase of cases) {
     await t.test(testCase.name, async child => {

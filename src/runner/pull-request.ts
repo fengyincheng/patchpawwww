@@ -507,7 +507,7 @@ export async function runPullRequest(config: { appId: number; privateKey: string
         } catch (error) {
           publication = (await deferDelivery(config.root, stored, error)).publication;
         }
-        trace.emit('run_notice_published', publication);
+        trace.emit(publication.status === 'published' ? 'run_notice_published' : 'run_notice_pending', publication);
         trace.save('notification.json', publication.status === 'published' ? publication
           : publication.status === 'blocked' ? { status: 'notification_failed', http_status: publication.last_error?.status ?? null }
           : { ...publication, status: 'notification_pending' });

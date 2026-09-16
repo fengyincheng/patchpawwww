@@ -41,6 +41,10 @@ test('classifies GitLab HTTP, network, and configuration failures as SCM/provide
   const networkFailure = classifyRunFailure(network);
   assert.equal(networkFailure.code, 'gitlab_unavailable');
   assert.equal(networkFailure.retryable, true);
+  assert.deepEqual(classifyRunFailure(Object.assign(new Error('GitLab Bot identity is unavailable'), { code: 'GITLAB_CONFIGURATION_ERROR' })), {
+    code: 'gitlab_configuration_error', category: 'scm', scm_platform: 'gitlab', retryable: false, user_action: 'check_configuration',
+    message: 'GitLab Bot identity is unavailable',
+  });
   assert.deepEqual(classifyRunFailure(new ControlPlaneError('provider_unavailable', 'Configured provider or model is disabled.')), {
     code: 'provider_configuration_error', category: 'provider', retryable: false, user_action: 'check_configuration',
     message: 'Configured provider or model is disabled.',
@@ -57,13 +61,20 @@ test('preserves dedicated model truncation status and renders a GitLab notice', 
   assert.match(body, /此 MR/);
 });
 
-test('renders GitLab authentication guidance without describing it as a provider error', () => {
+test('renders GitLab authentication and configuration guidance without describing it as a provider error', () => {
   const failure = classifyRunFailure(new GitLabHttpError(403, 'GitLab API request failed (403)'));
   const body = runNoticeBody({ run_id: 'gitlab-auth', head: 'head', status: 'harness_failed', phase: 'bootstrap',
     reason: failure.message, mentions: [], platform: 'gitlab', failure });
   assert.match(body, /GitLab 认证失败/);
-  assert.match(body, /检查 GitLab token 和连接配置/);
+  assert.match(body, /检查 GitLab token、连接配置、项目绑定和 Bot identity 配置/);
   assert.doesNotMatch(body, /检查 Provider 凭据和配置/);
+
+  const configuration = classifyRunFailure(Object.assign(new Error('GitLab connection token is unavailable'), { code: 'GITLAB_CONFIGURATION_ERROR' }));
+  const configurationBody = runNoticeBody({ run_id: 'gitlab-config', head: 'head', status: 'harness_failed', phase: 'bootstrap',
+    reason: configuration.message, mentions: [], platform: 'gitlab', failure: configuration });
+  assert.match(configurationBody, /GitLab 连接配置错误/);
+  assert.doesNotMatch(configurationBody, /GitLab 认证失败/);
+  assert.match(configurationBody, /token、连接配置、项目绑定和 Bot identity 配置/);
 });
 
 test('classifies an uncategorized Harness error as an actionable internal failure', () => {

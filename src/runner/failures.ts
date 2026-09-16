@@ -98,7 +98,7 @@ export function classifyRunFailure(error: unknown): RunFailure {
       ...(facts.upstream_code === undefined ? {} : { upstream_code: facts.upstream_code }) };
   }
   if (facts.code === 'GITLAB_CONFIGURATION_ERROR') {
-    return { code: 'gitlab_auth_failed', category: 'scm', scm_platform: 'gitlab', retryable: false,
+    return { code: 'gitlab_configuration_error', category: 'scm', scm_platform: 'gitlab', retryable: false,
       user_action: 'check_configuration', message: clip(errorMessage) };
   }
   if (facts.code === 'GITLAB_NETWORK_ERROR' || /GitLab request failed/i.test(errorMessage) && facts.code) {

@@ -189,14 +189,15 @@ async function runGitLabMergeRequestWithConnection(config: GitLabWorkerConfig, r
   let approvalSnapshot: Awaited<ReturnType<typeof loadCommandSnapshot>>['snapshot'] | undefined;
   let approvedConflictRepair = false;
   const finish = async (status: string, extra: Record<string, unknown> = {}) => {
-    const task = state.phase as 'ci' | 'repair' | 'review' | 'conflict';
+    const failedPhase = state.phase;
+    const task = failedPhase as 'ci' | 'repair' | 'review' | 'conflict';
     if (workspace && ['needs_human', 'stopped', 'budget_exhausted'].includes(status) && ['ci', 'repair', 'review', 'conflict'].includes(task)) {
       try {
         const pauseStatus = status === 'stopped' ? 'stopped' : status === 'budget_exhausted' ? 'budget_exhausted' : 'needs_human';
         await retainWorkspace(path, trace, { run_id: runId, execution_id: 1, task, workspace,
           base_sha: currentBaseForResume?.sha ?? snapshot.diffBaseSha ?? snapshot.target.sha,
           base_ref: currentBaseForResume?.ref ?? snapshot.target.ref, remote_head: state.current_head_sha,
-          pause_phase: state.phase, pause_reason: status === 'stopped' ? 'human_stop' : status === 'budget_exhausted' ? 'budget' : 'human_decision', status: pauseStatus });
+          pause_phase: failedPhase, pause_reason: status === 'stopped' ? 'human_stop' : status === 'budget_exhausted' ? 'budget' : 'human_decision', status: pauseStatus });
         preserveWorkspace = true;
       } catch (error) { trace.emit('workspace_retain_failed', { message: (error as Error).message }); }
     }
@@ -206,10 +207,11 @@ async function runGitLabMergeRequestWithConnection(config: GitLabWorkerConfig, r
       if (paused?.workspace.path === workspace.path) await savePaused(path, { ...paused, status: 'completed' });
     }
     const failure = extra.failure as RunFailure | undefined;
-    const result: Record<string, unknown> = { status, run_id: runId, repo, pr_number: number, final_head_sha: state.current_head_sha, ...extra };
+    const result: Record<string, unknown> = { status, run_id: runId, repo, pr_number: number, final_head_sha: state.current_head_sha,
+      ...extra, ...(failure ? { failed_phase: failedPhase } : {}) };
     trace.save('result.json', result);
     if (failure) {
-      const notice = { run_id: runId, head: state.current_head_sha, status, phase: state.phase,
+      const notice = { run_id: runId, head: state.current_head_sha, status, phase: failedPhase,
         reason: String(extra.reason ?? extra.message ?? failure.message ?? '本次任务尚未完成。'),
         mentions: [snapshot?.author.login, config.operatorLogin].filter((value): value is string => !!value),
         bot_login: resolved.adapter.botLogin, platform: 'gitlab' as const, failure };
@@ -223,7 +225,7 @@ async function runGitLabMergeRequestWithConnection(config: GitLabWorkerConfig, r
             head_sha: snapshot?.source.sha } });
         const attempt = await deliverImmediately(config.root, stored, { adapter: resolved.adapter, botLogin: resolved.adapter.botLogin });
         notification = attempt.publication;
-        trace.emit('run_notice_published', attempt.publication);
+        trace.emit(attempt.publication.status === 'published' ? 'run_notice_published' : 'run_notice_pending', attempt.publication);
       } catch (error) {
         notification = { status: 'failed', error: providerError(error) };
         trace.emit('run_notice_failed', notification as Record<string, unknown>);
@@ -697,9 +699,10 @@ async function runGitLabMergeRequestWithConnection(config: GitLabWorkerConfig, r
       return await finish('needs_human', { reason: error.message });
     }
     const failure = classifyRunFailure(error);
-    trace.emit('run_error', { phase: state.phase, ...providerError(error), message: failure.message,
+    const failedPhase = state.phase;
+    trace.emit('run_error', { phase: failedPhase, ...providerError(error), message: failure.message,
       failure_code: failure.code, failure_category: failure.category });
-    return await finish(terminalStatusForFailure(failure), { failed_phase: state.phase, error: providerError(error), message: failure.message, failure });
+    return await finish(terminalStatusForFailure(failure), { failed_phase: failedPhase, error: providerError(error), message: failure.message, failure });
   } finally {
     try { await stopWatcher?.close(); }
     finally {

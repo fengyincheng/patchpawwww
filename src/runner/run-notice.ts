@@ -22,6 +22,7 @@ export const failureTitles: Record<string, string> = {
   model_output_truncated: '模型输出被截断，尚未完成',
   github_unavailable: 'GitHub 服务暂时不可用',
   gitlab_auth_failed: 'GitLab 认证失败',
+  gitlab_configuration_error: 'GitLab 连接配置错误',
   gitlab_unavailable: 'GitLab 服务暂时不可用',
   gitlab_request_rejected: 'GitLab 拒绝了请求',
   gitlab_protocol_error: 'GitLab 服务返回格式异常',
@@ -38,7 +39,7 @@ function failureDetails(failure: RunFailure) {
   const platform = failure.scm_platform === 'gitlab' ? 'GitLab' : failure.scm_platform === 'github' ? 'GitHub' : 'SCM';
   const nextAction = failure.user_action === 'retry' ? '稍后重新发送原命令'
     : failure.user_action === 'check_configuration'
-      ? failure.scm_platform === 'gitlab' ? '检查 GitLab token 和连接配置' : failure.scm_platform === 'github' ? '检查 GitHub App 配置' : '检查 Provider 凭据和配置'
+      ? failure.scm_platform === 'gitlab' ? '检查 GitLab token、连接配置、项目绑定和 Bot identity 配置' : failure.scm_platform === 'github' ? '检查 GitHub App 配置' : '检查 Provider 凭据和配置'
       : failure.user_action === 'human_review' ? '请人工检查当前状态' : '查看 Run trace 后再决定下一步';
   return [
     `失败代码：\`${failure.code}\``,
