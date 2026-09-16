@@ -2,7 +2,7 @@ import { resolveRun, RunResolutionError } from '../src/observability/run-resolve
 import { parseTargetCommandArgs, TARGET_COMMAND_HELP } from '../src/observability/cli-options.ts';
 import { readNormalizedTrace, normalizeTraceBatch, readRunResult, readStateForRun } from '../src/observability/run-reader.ts';
 import { followTrace } from '../src/observability/trace-follow.ts';
-import { DETACHED_MESSAGE, renderMalformed, renderObservableEvent, renderObserverHeader, renderSummary, type RenderMode } from '../src/observability/renderer.ts';
+import { renderMalformed, renderObservableEvent, renderObserverHeader, renderObserverNotice, renderSummary, type RenderMode } from '../src/observability/renderer.ts';
 import { summarizeRun } from '../src/observability/run-summary.ts';
 import { workerStatus } from '../src/runner/state.ts';
 
@@ -18,13 +18,13 @@ function wait(milliseconds: number, signal: AbortSignal) {
   });
 }
 
-async function resolveWithWait(target: Parameters<typeof resolveRun>[0], signal: AbortSignal) {
+async function resolveWithWait(target: Parameters<typeof resolveRun>[0], signal: AbortSignal, mode: RenderMode) {
   let announced = false;
   while (!signal.aborted) {
     try { return await resolveRun(target); }
     catch (error) {
       if (!(error instanceof RunResolutionError) || error.code !== 'run_not_found' || !target.repo) throw error;
-      if (!announced) { write('No active local run. Waiting for the next PatchPaw run...'); announced = true; }
+      if (!announced) { write(renderObserverNotice('waiting', mode)); announced = true; }
       await wait(500, signal);
     }
   }
@@ -41,8 +41,8 @@ async function main() {
   const onSignal = () => { detached = true; controller.abort(); };
   process.once('SIGINT', onSignal);
   try {
-    const run = options.wait ? await resolveWithWait(options.target, controller.signal) : await resolveRun(options.target);
-    if (!run) { if (detached) write(DETACHED_MESSAGE); return; }
+    const run = options.wait ? await resolveWithWait(options.target, controller.signal, options.mode) : await resolveRun(options.target);
+    if (!run) { if (detached) write(renderObserverNotice('detached', options.mode)); return; }
     const initial = await readNormalizedTrace(run);
     const allEvents = [...initial.events];
     if (options.mode !== 'json') write(renderObserverHeader(run.runId, options.mode));
@@ -52,12 +52,12 @@ async function main() {
     let result = await readRunResult(run);
     let state = await readStateForRun(run.runtimeHome, run.runId) ?? run.state;
     const interrupted = state?.active && workerStatus(state) === 'interrupted';
-    if (!result && !interrupted && state?.active !== false && !controller.signal.aborted) {
+    if (!result && !interrupted && !controller.signal.aborted) {
       for await (const batch of followTrace({ reader: initial.reader, resultPath: run.resultPath, signal: controller.signal,
         isComplete: async () => {
           if (await readRunResult(run)) return true;
           const current = await readStateForRun(run.runtimeHome, run.runId);
-          return current?.active === false || !!(current?.active && workerStatus(current) === 'interrupted');
+          return !!(current?.active && workerStatus(current) === 'interrupted');
         } })) {
         const normalized = normalizeTraceBatch(run.runId, batch);
         allEvents.push(...normalized.events);
@@ -67,8 +67,8 @@ async function main() {
       result = await readRunResult(run);
       state = await readStateForRun(run.runtimeHome, run.runId) ?? state;
     }
-    if (detached) { write(DETACHED_MESSAGE); return; }
-    if (result || state?.active === false || !!(state?.active && workerStatus(state) === 'interrupted')) {
+    if (detached) { write(renderObserverNotice('detached', options.mode)); return; }
+    if (result || !!(state?.active && workerStatus(state) === 'interrupted')) {
       const summary = summarizeRun({ runId: run.runId, manifest: run.manifest, result, state, events: allEvents });
       if (options.mode !== 'json') write('');
       write(renderSummary(summary, options.mode));

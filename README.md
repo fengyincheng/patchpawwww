@@ -218,6 +218,19 @@ Webhook 返回 `202 verification_pending` 表示已入队，还需确认机器�
 
 `/review`、`/CI`、`/conflict` 是初始化创建的仓库命令，可以在控制台管理；`/stop`、`/close`、`/approval` 是系统控制命令。命令匹配不区分大小写。未知、禁用或同一评论中歧义的多个命令会按普通对话处理，不会因此授权修复。`/repair` 不是默认创建的命令；需要时可在控制台创建并选择 repair 执行类型。
 
+### 本地 Agent Run 观察
+
+在运行 PatchPaw 的同一台机器上，可以只读观察本地 Agent Run；这些命令不会查询远端，也不会控制或停止 Agent：
+
+```bash
+npm run agent:open -- owner/repo 132
+npm run agent:open -- --run <run-id> --replay 20
+npm run agent:status -- owner/repo 132
+npm run agent:runs -- --failed --limit 50
+```
+
+`agent:open` 默认回放最近 50 条事件并继续跟随；可使用 `--all`、`--replay N`、`--compact`、`--verbose`、`--json` 和 `--wait`。按 `Ctrl+C` 只会让观察器脱离，Agent 仍会继续运行。
+
 ### 停止与清理是两件事
 
 中途想停时发送：

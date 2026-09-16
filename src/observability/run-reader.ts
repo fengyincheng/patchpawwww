@@ -13,20 +13,21 @@ export interface NormalizedTrace {
   reader: TraceReader;
 }
 
+function normalizeRecords(runId: string, records: unknown[]) {
+  return records.flatMap(record => {
+    const event = normalizeObservableEvent(record, runId);
+    return event ? [event] : [];
+  });
+}
+
 export async function readNormalizedTrace(run: Pick<ResolvedRun, 'runId' | 'tracePath'>): Promise<NormalizedTrace> {
   const reader = new TraceReader(run.tracePath);
   const batch = await reader.readAvailable();
-  return { events: batch.records.flatMap(record => {
-    const event = normalizeObservableEvent(record, run.runId);
-    return event ? [event] : [];
-  }), malformed: batch.malformed, reader };
+  return { events: normalizeRecords(run.runId, batch.records), malformed: batch.malformed, reader };
 }
 
 export function normalizeTraceBatch(runId: string, batch: Awaited<ReturnType<TraceReader['readAvailable']>>) {
-  return { events: batch.records.flatMap(record => {
-    const event = normalizeObservableEvent(record, runId);
-    return event ? [event] : [];
-  }), malformed: batch.malformed };
+  return { events: normalizeRecords(runId, batch.records), malformed: batch.malformed };
 }
 
 export async function readRunResult(run: Pick<ResolvedRun, 'resultPath'>) {

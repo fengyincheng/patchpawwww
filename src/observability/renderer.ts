@@ -151,7 +151,12 @@ export function renderRunList(runs: ListedRun[], mode: RenderMode = 'readable') 
     status: typeof run.result?.status === 'string' ? run.result.status : 'active/unknown',
     error: run.error,
   })));
-  if (mode === 'compact') return runs.map(run => `${boundedText(run.startedAt ?? 'unknown')} ${boundedText(run.runId ?? 'corrupt')} ${boundedText(typeof run.result?.status === 'string' ? run.result.status : 'active/unknown')}`);
+  if (mode === 'compact') return runs.map(run => {
+    const task = Array.isArray(run.manifest?.task_chain) && typeof run.manifest.task_chain.at(-1) === 'string' ? run.manifest.task_chain.at(-1) : 'unknown';
+    const repo = manifestRepo(run.manifest);
+    const target = typeof repo === 'string' ? `${repo}#${run.manifest?.pr_number ?? '?'}` : 'corrupt manifest';
+    return `${boundedText(run.startedAt ?? 'unknown')} ${boundedText(run.runId ?? 'corrupt')} task=${boundedText(task)} target=${boundedText(target)} status=${boundedText(typeof run.result?.status === 'string' ? run.result.status : 'active/unknown')}`;
+  });
   const rows = ['TIME                 RUN                              TASK       STATUS       REPO / PR'];
   for (const run of runs) {
     const task = Array.isArray(run.manifest?.task_chain) && typeof run.manifest.task_chain.at(-1) === 'string' ? boundedText(run.manifest.task_chain.at(-1)) : 'unknown';
@@ -172,3 +177,9 @@ export function renderMalformed(line: number, message: string, excerpt: string, 
 }
 
 export const DETACHED_MESSAGE = 'Observer detached. PatchPaw Agent was not stopped.';
+
+export function renderObserverNotice(kind: 'waiting' | 'detached', mode: RenderMode) {
+  const title = kind === 'waiting' ? 'WAITING' : 'DETACHED';
+  const message = kind === 'waiting' ? 'No active local run. Waiting for the next PatchPaw run...' : DETACHED_MESSAGE;
+  return mode === 'json' ? cleanJson({ kind: 'observer', title, message }) : message;
+}

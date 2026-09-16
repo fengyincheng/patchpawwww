@@ -27,5 +27,10 @@ export function redactValue(value: unknown, secrets: ReadonlySet<string> = new S
 }
 
 export function cleanJson(value: unknown, secrets: ReadonlySet<string> = new Set()) {
-  return JSON.stringify(redactValue(value, secrets)) ?? 'null';
+  return JSON.stringify(value, (key, child) => {
+    if (SENSITIVE_KEY.test(key)) return '[REDACTED]';
+    if (typeof child === 'bigint') return String(child);
+    if (typeof child === 'string') return redactText(child, secrets);
+    return child;
+  }) ?? 'null';
 }

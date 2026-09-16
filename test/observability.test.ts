@@ -11,7 +11,7 @@ import { patchpawPaths } from '../src/config/paths.ts';
 import { statePath } from '../src/runner/state.ts';
 import { listRunManifests, resolveRun } from '../src/observability/run-resolver.ts';
 import { summarizeRun } from '../src/observability/run-summary.ts';
-import { renderObservableEvent, renderRunList, renderSummary } from '../src/observability/renderer.ts';
+import { renderObservableEvent, renderObserverNotice, renderRunList, renderSummary } from '../src/observability/renderer.ts';
 import { parseTargetCommandArgs, parseRunsArgs } from '../src/observability/cli-options.ts';
 
 test('TraceReader replays complete JSONL and waits for a partial trailing line', async () => {
@@ -64,6 +64,9 @@ test('normalization exposes bounded facts and never invents reasoning', () => {
   assert.equal(model?.title, 'MODEL STEP');
   assert.equal(normalizeObservableEvent({ event: 'tool_start', prompt: 'private thought' }, 'run-1')?.kind, 'tool');
   assert.equal(normalizeObservableEvent({ event: 'model_step', thinking: null }, 'run-1')?.kind, 'model');
+  assert.equal(normalizeObservableEvent({ event: 'model_step', thinking: 'deliberate next step' }, 'run-1')?.kind, 'thinking');
+  assert.equal(normalizeObservableEvent({ event: 'validation', command: 'npm test', exitCode: 0 }, 'run-1')?.kind, 'validation');
+  assert.equal(normalizeObservableEvent({ event: 'future_event', message: 'new schema' }, 'run-1')?.kind, 'warning');
   assert.equal(normalizeObservableEvent({ event: 'stale_workspace_disposed', workspace: '/tmp/ws' }, 'run-1')?.kind, 'workspace');
 });
 
@@ -231,6 +234,7 @@ test('renderer keeps readable details bounded and provides compact/json modes', 
   assert.match(readable, /TOOL RESULT read_file/);
   assert.doesNotMatch(readable, /ghp_example_token/);
   assert.match(renderObservableEvent(event, 'compact'), /^00:00:00 TOOL RESULT read_file/);
+  assert.match(renderObservableEvent(event, 'verbose'), /output_excerpt=/);
   const json = JSON.parse(renderObservableEvent(event, 'json'));
   assert.equal(json.kind, 'tool');
   assert.equal(json.detail.output_excerpt, 'secret [REDACTED]');
@@ -248,7 +252,7 @@ test('summary renderer presents status without exposing a raw credential', () =>
 
 test('observer JSON projections do not dump full run artifacts', () => {
   const listed = renderRunList([{
-    runId: 'run-1', manifestPath: '/tmp/run-1/manifest.json', startedAt: '2026-09-16T00:00:00.000Z',
+    runId: 'run-1', manifestPath: 'run-1/manifest.json', startedAt: '2026-09-16T00:00:00.000Z',
     manifest: { repo: 'owner/repo', pr_number: 7, task_chain: ['review'], huge_prompt: 'x'.repeat(20_000) },
     result: { status: 'review_completed', answer: 'x'.repeat(20_000) },
   }], 'json');
@@ -260,6 +264,23 @@ test('observer JSON projections do not dump full run artifacts', () => {
   const summary = renderSummary(summarizeRun({ runId: 'run-1', result: { status: 'failed', answer: 'x'.repeat(20_000) }, events: [] }), 'json');
   const summaryJson = JSON.parse(summary);
   assert.equal(summaryJson.result.answer, undefined);
+});
+
+test('observer notices remain one-line JSON records in JSON mode', () => {
+  const waiting = JSON.parse(renderObserverNotice('waiting', 'json'));
+  assert.deepEqual(waiting, { kind: 'observer', title: 'WAITING', message: 'No active local run. Waiting for the next PatchPaw run...' });
+  const detached = JSON.parse(renderObserverNotice('detached', 'json'));
+  assert.equal(detached.title, 'DETACHED');
+  assert.match(detached.message, /not stopped/);
+});
+
+test('compact run lists include task and canonical target context', () => {
+  const [line] = renderRunList([{
+    runId: 'run-1', manifestPath: 'run-1/manifest.json', startedAt: '2026-09-16T00:00:00.000Z',
+    manifest: { repository: 'group/sub/project', pr_number: 7, task_chain: ['review'] }, result: { status: 'review_completed' },
+  }], 'compact');
+  assert.match(line!, /task=review/);
+  assert.match(line!, /target=group\/sub\/project#7/);
 });
 
 test('CLI options keep the repo entry point and exact run entry point unambiguous', () => {

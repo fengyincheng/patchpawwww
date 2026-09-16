@@ -70,6 +70,10 @@ function manifestMatches(manifest: RunManifest, repo: string, number: number) {
   return names.includes(repo) && Number(manifest.pr_number) === number;
 }
 
+function stateMatches(state: RunState | null, repo: string, number: number) {
+  return state?.repo === repo && Number(state.pr_number) === number;
+}
+
 async function loadResolvedRun(runtimeHome: string, runId: string, state: RunState | null, source: ResolvedRun['source'], expected?: { repo: string; changeNumber: number }): Promise<ResolvedRun> {
   if (!isSafeRunId(runId)) throw new RunResolutionError('invalid_run_id', `Unsafe run id: ${runId}`);
   const dir = join(patchpawPaths(runtimeHome).runs, runId);
@@ -106,7 +110,7 @@ export async function listRunManifests(runtimeHome?: string): Promise<ListedRun[
       if (!manifest) throw new Error('Run manifest is missing');
       if (manifest.run_id !== entry.name) throw new Error('Run manifest id does not match its directory');
       const result = await readObject(join(runs, entry.name, 'result.json'), true);
-      listed.push({ runId: typeof manifest.run_id === 'string' ? manifest.run_id : undefined, manifest, result, manifestPath,
+      listed.push({ runId: entry.name, manifest, result, manifestPath,
         startedAt: typeof manifest.started_at === 'string' ? manifest.started_at : undefined });
     } catch (error) {
       listed.push({ manifestPath, error: error instanceof Error ? error.message : String(error) });
@@ -126,6 +130,7 @@ export async function resolveRun(target: RunTarget): Promise<ResolvedRun> {
   let state: RunState | null = null;
   try { state = await readState(stateFile); }
   catch { /* A corrupt shortcut state is recoverable by scanning manifests below. */ }
+  if (!stateMatches(state, target.repo, target.changeNumber)) state = null;
   if (typeof state?.run_id === 'string' && state.run_id) {
     try { return await loadResolvedRun(paths.home, state.run_id, state, 'state', { repo: target.repo, changeNumber: target.changeNumber }); }
     catch (error) {

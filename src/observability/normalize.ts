@@ -84,7 +84,12 @@ function selectedDetail(event: string, source: RawTraceEvent) {
 
 function explicitThinking(source: RawTraceEvent) {
   for (const key of ['reasoning', 'thinking', 'reasoning_content', 'reasoning_summary']) {
-    if (source[key] !== undefined && source[key] !== null) return detail(source, [key]);
+    const value = source[key];
+    if ((typeof value === 'string' && value.trim().length > 0)
+      || (Array.isArray(value) && value.length > 0)
+      || (value && typeof value === 'object' && Object.keys(value).length > 0)) {
+      return detail(source, [key]);
+    }
   }
   return undefined;
 }
