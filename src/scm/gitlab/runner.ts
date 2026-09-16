@@ -14,6 +14,7 @@ import { bootstrapControlPlane, getRepository, getScmConnection, loadCommandSnap
 import type { ControlPlaneDb } from '../../control-plane/db.ts';
 import { runtimeExecutionFromSnapshot } from '../../harness/runtime.ts';
 import { Trace } from '../../harness/trace.ts';
+import { providerError } from '../../harness/retry.ts';
 import { seedContext } from '../../harness/context/seed.ts';
 import { runConversation } from '../../tasks/conversation/agent.ts';
 import { runReview } from '../../tasks/review/agent.ts';
@@ -39,6 +40,8 @@ import { approvalDeliverySemanticKey, newConflictApproval, readConflictApproval,
 import { createConflictProposal, markConflictProposalStatus, proposalDeliverySemanticKey, proposalPointerForState, readCurrentConflictProposal, renderConflictProposal, saveConflictProposal, saveProposalState } from '../../runner/conflict-proposals.ts';
 import { closeRefusalBody, hasPendingClose, resumePendingClose, retryPendingCloseCompletion, runClose } from '../../runner/close.ts';
 import { ReviewStale } from '../errors.ts';
+import { classifyRunFailure, terminalStatusForFailure, type RunFailure } from '../../runner/failures.ts';
+import { runNoticeBody } from '../../runner/run-notice.ts';
 
 export interface GitLabWorkerConfig {
   root: string;
@@ -46,6 +49,12 @@ export interface GitLabWorkerConfig {
   operatorLogin?: string;
   gitlabConnections?: Array<{ id: string; instanceUrl: string; projectIds: string[]; token?: string; botUserId?: string; botLogin?: string }>;
   controlPlaneDb?: ControlPlaneDb;
+}
+
+type GitLabResolvedConnection = NonNullable<Awaited<ReturnType<typeof connectionFor>>>;
+
+function gitlabConfigurationError(message: string) {
+  return Object.assign(new Error(message), { code: 'GITLAB_CONFIGURATION_ERROR' });
 }
 
 async function connectionFor(config: GitLabWorkerConfig, repo: string) {
@@ -60,19 +69,47 @@ async function connectionFor(config: GitLabWorkerConfig, repo: string) {
         botUserId: stored.botUserId ?? undefined, botLogin: stored.botLogin ?? undefined };
     }
   }
-  if (!configured?.token) throw new Error('GitLab connection token is unavailable');
+  if (!configured?.token) throw gitlabConfigurationError('GitLab connection token is unavailable');
   const client = new GitLabClient({ baseUrl: configured.instanceUrl, token: configured.token });
   const { data: user } = await client.user();
   const botUserId = user.id === undefined ? '' : String(user.id);
   const botLogin = typeof user.username === 'string' ? user.username : '';
-  if (!botUserId || !botLogin) throw new Error('GitLab Bot identity is unavailable');
+  if (!botUserId || !botLogin) throw gitlabConfigurationError('GitLab Bot identity is unavailable');
   if (configured.botUserId && configured.botUserId !== botUserId || configured.botLogin && configured.botLogin.toLowerCase() !== botLogin.toLowerCase()) {
-    throw new Error('GitLab Bot identity configuration is stale');
+    throw gitlabConfigurationError('GitLab Bot identity configuration is stale');
   }
   const connection: ScmConnection = { id: configured.id, kind: 'gitlab', instanceUrl: configured.instanceUrl, credentialRef: null, webhookMode: 'secret', webhookSecretRef: null,
     botUserId, botLogin, projectIds: configured.projectIds, enabled: true, createdAt: '', updatedAt: '' };
   const adapter = new GitLabAdapter(connection, client, { id: botUserId, username: botLogin });
   return { connection, adapter, projectId: match[2] };
+}
+
+function newRunId() { return `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`; }
+
+async function persistGitLabBootstrapFailure(config: GitLabWorkerConfig, repo: string, number: number, error: unknown) {
+  const path = statePath(patchpawPaths(config.root).state, repo, number);
+  if (workerStatus(await readState(path)) === 'running') return { status: 'already_running' };
+  const release = await claimRun(path);
+  if (!release) return { status: 'already_running' };
+  const runId = newRunId();
+  const trace = new Trace(runDir(config, runId));
+  const previous = await readState(path);
+  const failure = classifyRunFailure(error);
+  const status = terminalStatusForFailure(failure);
+  const state: RunState = { repo, pr_number: number, run_id: runId, current_head_sha: '', phase: status,
+    repair_attempts: 0, last_patchpaw_commit: null, waiting_for_ci: false, active: false, pid: process.pid,
+    handled_comment_ids: previous?.handled_comment_ids ?? [] };
+  const result = { status, run_id: runId, repo, pr_number: number, final_head_sha: '', failed_phase: 'bootstrap',
+    error: providerError(error), message: failure.message, failure,
+    notification: { status: 'not_attempted', reason: 'GitLab connection was unavailable; no MR Note was attempted.' } };
+  try {
+    trace.emit('run_error', { phase: 'bootstrap', ...providerError(error), message: failure.message,
+      failure_code: failure.code, failure_category: failure.category });
+    await writeState(path, state);
+    trace.save('notification.json', result.notification);
+    trace.save('result.json', result);
+    return result;
+  } finally { await release(); }
 }
 
 function fakePullRequest(snapshot: Awaited<ReturnType<GitLabAdapter['readChangeRequest']>>) {
@@ -91,8 +128,20 @@ function sameProjectMergeRequest(snapshot: { source: { projectId: string }; targ
 
 /** GitLab-only worker entry. It reuses the existing Harness/workspace lifecycle for read-only tasks. */
 export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: string, number: number) {
-  const resolved = await connectionFor(config, repo);
-  if (!resolved) throw new Error('Invalid GitLab storage key');
+  const path = statePath(patchpawPaths(config.root).state, repo, number);
+  if (workerStatus(await readState(path)) === 'running') return { status: 'already_running' };
+  let resolved: GitLabResolvedConnection;
+  try {
+    const candidate = await connectionFor(config, repo);
+    if (!candidate) throw gitlabConfigurationError('Invalid GitLab storage key');
+    resolved = candidate;
+  } catch (error) {
+    return persistGitLabBootstrapFailure(config, repo, number, error);
+  }
+  return runGitLabMergeRequestWithConnection(config, repo, number, resolved);
+}
+
+async function runGitLabMergeRequestWithConnection(config: GitLabWorkerConfig, repo: string, number: number, resolved: GitLabResolvedConnection) {
   const path = statePath(patchpawPaths(config.root).state, repo, number);
   if (workerStatus(await readState(path)) === 'running') return { status: 'already_running' };
   if (await hasPendingClose(path)) {
@@ -128,7 +177,7 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
   let workspace: Awaited<ReturnType<typeof prepareWorkspace>> | undefined; let workspacePath: string | undefined;
   let preserveWorkspace = false;
   let stopWatcher: ReturnType<typeof watchStop> | undefined;
-  const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
+  const runId = newRunId();
   const trace = new Trace(runDir(config, runId));
   const previous = await readState(path);
   const state: RunState = { repo, pr_number: number, run_id: runId, current_head_sha: '', phase: 'inspect', repair_attempts: 0, last_patchpaw_commit: null,
@@ -156,8 +205,34 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
       const paused = await readPaused(path);
       if (paused?.workspace.path === workspace.path) await savePaused(path, { ...paused, status: 'completed' });
     }
-    const result = { status, run_id: runId, repo, pr_number: number, final_head_sha: state.current_head_sha, ...extra };
-    trace.save('result.json', result); return result;
+    const failure = extra.failure as RunFailure | undefined;
+    const result: Record<string, unknown> = { status, run_id: runId, repo, pr_number: number, final_head_sha: state.current_head_sha, ...extra };
+    trace.save('result.json', result);
+    if (failure) {
+      const notice = { run_id: runId, head: state.current_head_sha, status, phase: state.phase,
+        reason: String(extra.reason ?? extra.message ?? failure.message ?? '本次任务尚未完成。'),
+        mentions: [snapshot?.author.login, config.operatorLogin].filter((value): value is string => !!value),
+        bot_login: resolved.adapter.botLogin, platform: 'gitlab' as const, failure };
+      trace.save('run-notice.json', notice);
+      let notification: unknown = { status: 'not_attempted', reason: 'Failure notice was not attempted.' };
+      try {
+        const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose: 'run_notice',
+          semanticKey: `run-notice:${runId}`, body: runNoticeBody(notice), mentions: notice.mentions,
+          botLogin: resolved.adapter.botLogin,
+          source: { run_id: runId, status, connection_id: resolved.connection.id, project_id: resolved.projectId,
+            head_sha: snapshot?.source.sha } });
+        const attempt = await deliverImmediately(config.root, stored, { adapter: resolved.adapter, botLogin: resolved.adapter.botLogin });
+        notification = attempt.publication;
+        trace.emit('run_notice_published', attempt.publication);
+      } catch (error) {
+        notification = { status: 'failed', error: providerError(error) };
+        trace.emit('run_notice_failed', notification as Record<string, unknown>);
+      }
+      result.notification = notification;
+      trace.save('notification.json', notification);
+      trace.save('result.json', result);
+    }
+    return result;
   };
   try {
     const feedbackResult = await humanFeedback(path, patchpawPaths(config.root).runs, true);
@@ -618,8 +693,13 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
     return await finish('needs_human', { reason: 'GitLab conflict approval requires a fresh proposal workflow; no MR approval or merge API is called.' });
   } catch (error) {
     if (error instanceof TaskStopped) return await finish('stopped', { reason: error.message });
-    trace.emit('run_error', { error_name: (error as Error).name, message: (error as Error).message });
-    return await finish('needs_human', { reason: 'GitLab worker failed before a safe completion.', error_name: (error as Error).name });
+    if (error instanceof Error && /GitLab (MR head or target branch changed before push|candidate history is not a fast-forward descendant of the MR head|target branch changed after push|MR head changed or push confirmation timed out)/.test(error.message)) {
+      return await finish('needs_human', { reason: error.message });
+    }
+    const failure = classifyRunFailure(error);
+    trace.emit('run_error', { phase: state.phase, ...providerError(error), message: failure.message,
+      failure_code: failure.code, failure_category: failure.category });
+    return await finish(terminalStatusForFailure(failure), { failed_phase: state.phase, error: providerError(error), message: failure.message, failure });
   } finally {
     try { await stopWatcher?.close(); }
     finally {

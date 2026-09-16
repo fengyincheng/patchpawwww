@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import { dirname } from 'node:path';
-import { runNoticeBody, type RunNotice } from '../github/comments.ts';
+import { runNoticeBody, type RunNotice } from './run-notice.ts';
 import { readArtifact } from './review-lifecycle.ts';
 import type { Trace } from '../harness/trace.ts';
 import { deliverImmediately, enqueueCommentDelivery } from './outbound.ts';

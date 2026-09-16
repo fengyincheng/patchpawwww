@@ -19,8 +19,8 @@ import { deliverImmediately, listOutbound } from '../src/runner/outbound.ts';
 
 const repo = 'gitlab:worker:project:88';
 
-function json(data: unknown, status = 200) {
-  return { data, status };
+function json(data: unknown, status = 200, headers?: Record<string, string>) {
+  return { data, status, headers };
 }
 
 async function requestBody(request: IncomingMessage) {
@@ -31,7 +31,7 @@ async function requestBody(request: IncomingMessage) {
 
 function sendJson(response: ServerResponse, result: ReturnType<typeof json>) {
   const body = JSON.stringify(result.data);
-  response.writeHead(result.status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+  response.writeHead(result.status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...result.headers });
   response.end(body);
 }
 
@@ -63,6 +63,9 @@ interface WorkerControl {
   normalModelCalls: number;
   repairStep: number;
   holdNormalModel: boolean;
+  modelFailure?: 'provider_429' | 'provider_401' | 'provider_403' | 'invalid_response';
+  userFailure?: { status: number } | 'network';
+  botIdentity?: { id?: number; username?: string };
   modelStarted?: () => void;
   releaseNormalModel?: () => void;
   mrState: 'opened' | 'closed' | 'merged';
@@ -144,6 +147,10 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
   };
   const responseForModel = async (body: any) => {
     control.modelCalls++;
+    if (control.modelFailure === 'provider_429') return json({ error: { message: 'fixture provider overloaded', code: 1305 } }, 429, { 'retry-after': '0' });
+    if (control.modelFailure === 'provider_401') return json({ error: { message: 'fixture provider credentials rejected', code: 'invalid_api_key' } }, 401);
+    if (control.modelFailure === 'provider_403') return json({ error: { message: 'fixture provider access denied', code: 'forbidden' } }, 403);
+    if (control.modelFailure === 'invalid_response') return json({ choices: [{ message: { role: 'assistant', content: '{invalid' }, finish_reason: 'stop' }] });
     const tools = (body.tools ?? []) as Array<{ function?: { name?: string } }>;
     const toolNames = new Set(tools.map(tool => tool.function?.name));
     const stopCloseout = toolNames.size === 1 && toolNames.has('submit_stop_report');
@@ -210,7 +217,11 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
       const body = await requestBody(request);
       if (url.pathname === '/v1/chat/completions') return sendJson(response, await responseForModel(JSON.parse(body || '{}')));
       control.apiCalls.push({ method, path: url.pathname });
-      if (url.pathname === '/gitlab/api/v4/user') return sendJson(response, json({ id: 900, username: 'patchpaw', bot: true, state: 'active' }));
+      if (url.pathname === '/gitlab/api/v4/user') {
+        if (control.userFailure === 'network') return request.socket.destroy();
+        if (control.userFailure) return sendJson(response, json({ message: `fixture user failure ${control.userFailure.status}` }, control.userFailure.status));
+        return sendJson(response, json({ id: control.botIdentity?.id ?? 900, username: control.botIdentity?.username ?? 'patchpaw', bot: true, state: 'active' }));
+      }
       if (url.pathname === '/gitlab/api/v4/projects/88') return sendJson(response, json({ id: 88, path_with_namespace: 'group/repo', web_url: `${instanceUrl}/group/repo`, http_url_to_repo: cloneUrl }));
       if (url.pathname === '/gitlab/api/v4/projects/99') return sendJson(response, json({ id: 99, path_with_namespace: 'other/repo', web_url: `${instanceUrl}/other/repo`, http_url_to_repo: cloneUrl }));
       if (url.pathname === '/gitlab/api/v4/projects/88/merge_requests/3') {
@@ -484,6 +495,86 @@ test('GitLab active /close is durably refused and never runs cleanup', async t =
   const state = await readState(fixture.path); assert.equal(state?.closed_at, undefined); assert.equal(state?.closed_through_comment_id, undefined);
   assert.equal(state?.handled_comment_ids?.includes(101), true); assert.equal(await hasHumanReplies(fixture.path), false);
   assert.equal((await runGitLabMergeRequest(fixture.config, repo, 3))?.status, 'mention_required'); assert.equal(fixture.control.normalModelCalls, 1);
+});
+
+test('GitLab provider failure publishes a classified durable MR Note', async t => {
+  const fixture = await workerFixture(t, 'repair'); fixture.control.modelFailure = 'provider_429'; await fixture.addComment(100, '@patchpaw /repair');
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'provider_unavailable');
+  assert.equal((result as any).failure.code, 'provider_upstream_unavailable');
+  assert.equal((result as any).failure.retryable, true);
+  assert.equal((result as any).failure.user_action, 'retry');
+  assert.equal((result as any).failure.upstream_status, 429);
+  assert.equal((result as any).failure.attempts, 4);
+  assert.equal((result as any).notification.status, 'published');
+  const runResult = JSON.parse(await readFile(join(fixture.root, 'runs', (result as any).run_id, 'result.json'), 'utf8'));
+  assert.equal(runResult.status, 'provider_unavailable');
+  assert.equal(runResult.failure.code, 'provider_upstream_unavailable');
+  assert.equal(runResult.notification.status, 'published');
+  const trace = await readFile(join(fixture.root, 'runs', (result as any).run_id, 'trace.jsonl'), 'utf8');
+  assert.match(trace, /"event":"run_error"/);
+  const notice = fixture.control.remoteNotes.find(note => note.author.id === 900 && note.body.includes('模型服务暂时不可用'));
+  assert.ok(notice);
+  assert.match(notice.body, /provider_upstream_unavailable/);
+  assert.match(notice.body, /HTTP 429/);
+  assert.match(notice.body, /稍后重新发送原命令/);
+  const outbox = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice');
+  assert.equal(outbox?.item.semantic_key, `run-notice:${(result as any).run_id}`);
+  assert.equal(outbox?.item.status, 'delivered');
+});
+
+test('GitLab failure Note publication keeps the primary failure and does not rerun the model', async t => {
+  const fixture = await workerFixture(t, 'repair'); fixture.control.modelFailure = 'provider_429'; fixture.control.failNotePublication = true;
+  await fixture.addComment(100, '@patchpaw /repair');
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'provider_unavailable');
+  assert.equal((result as any).failure.code, 'provider_upstream_unavailable');
+  assert.equal((result as any).notification.status, 'blocked');
+  const modelCalls = fixture.control.modelCalls;
+  const stored = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice');
+  assert.ok(stored); assert.equal(stored!.item.status, 'blocked');
+  fixture.control.failNotePublication = false;
+  const connection: ScmConnection = { id: 'worker', kind: 'gitlab', instanceUrl: fixture.config.gitlabConnections[0]!.instanceUrl,
+    credentialRef: null, webhookMode: 'secret', webhookSecretRef: null, botUserId: '900', botLogin: 'patchpaw', projectIds: ['88'], enabled: true, createdAt: '', updatedAt: '' };
+  const adapter = new GitLabAdapter(connection, new GitLabClient({ baseUrl: connection.instanceUrl, token: 'fixture-token' }), { id: '900', username: 'patchpaw' });
+  const retry = await deliverImmediately(fixture.root, stored!, { adapter, botLogin: 'patchpaw' });
+  assert.equal(retry.item.status, 'delivered');
+  assert.equal(fixture.control.modelCalls, modelCalls);
+  assert.equal(fixture.control.remoteNotes.filter(note => note.author.id === 900 && note.body.includes('模型服务暂时不可用')).length, 1);
+  const persisted = JSON.parse(await readFile(join(fixture.root, 'runs', (result as any).run_id, 'result.json'), 'utf8'));
+  assert.equal(persisted.status, 'provider_unavailable');
+  assert.equal(persisted.failure.code, 'provider_upstream_unavailable');
+});
+
+test('GitLab connection bootstrap failures persist terminal evidence', async t => {
+  const cases: Array<{ name: string; setup: (fixture: WorkerFixture) => void; expected: string; targetRepo?: string }> = [
+    { name: 'missing token', setup: fixture => { (fixture.config.gitlabConnections[0]! as { token?: string }).token = undefined; }, expected: 'gitlab_auth_failed' },
+    { name: 'GitLab user auth failure', setup: fixture => { fixture.control.userFailure = { status: 401 }; }, expected: 'gitlab_auth_failed' },
+    { name: 'GitLab user network failure', setup: fixture => { fixture.control.userFailure = 'network'; }, expected: 'gitlab_unavailable' },
+    { name: 'bot identity unavailable', setup: fixture => { fixture.control.botIdentity = { id: 900, username: '' }; }, expected: 'gitlab_auth_failed' },
+    { name: 'stale bot identity', setup: fixture => { fixture.config.gitlabConnections[0]!.botUserId = '901'; }, expected: 'gitlab_auth_failed' },
+    { name: 'invalid storage key', setup: () => {}, expected: 'gitlab_auth_failed', targetRepo: 'gitlab:invalid' },
+  ];
+  for (const testCase of cases) {
+    await t.test(testCase.name, async child => {
+      const fixture = await workerFixture(child, 'review'); testCase.setup(fixture);
+      const targetRepo = testCase.targetRepo ?? repo;
+      const result = await runGitLabMergeRequest(fixture.config, targetRepo, 3);
+      assert.equal(result?.status, 'harness_failed');
+      assert.equal((result as any).failure.code, testCase.expected);
+      assert.equal((result as any).failure.scm_platform, 'gitlab');
+      assert.equal((result as any).notification.status, 'not_attempted');
+      const runDir = join(fixture.root, 'runs', (result as any).run_id);
+      const persisted = JSON.parse(await readFile(join(runDir, 'result.json'), 'utf8'));
+      assert.equal(persisted.status, 'harness_failed');
+      assert.equal(persisted.failed_phase, 'bootstrap');
+      assert.equal(persisted.failure.code, testCase.expected);
+      assert.equal((await readState(statePath(patchpawPaths(fixture.root).state, targetRepo, 3)))?.active, false);
+      const trace = await readFile(join(runDir, 'trace.jsonl'), 'utf8');
+      assert.match(trace, /"event":"run_error"/);
+      assert.match(trace, /bootstrap/);
+    });
+  }
 });
 
 async function readFileIfPresent(path: string) {

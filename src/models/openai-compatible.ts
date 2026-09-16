@@ -75,7 +75,15 @@ function retryableStatus(status: number | undefined) {
   return status === 408 || status === 429 || (status !== undefined && status >= 500);
 }
 
-function providerResponseError(raw: string, responseStatus: number) {
+function retryAfterDelay(value: string | null) {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
+
+function providerResponseError(raw: string, responseStatus: number, responseRetryAfterMs?: number) {
   let payload: unknown;
   try { payload = JSON.parse(raw); } catch { payload = undefined; }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
@@ -88,7 +96,7 @@ function providerResponseError(raw: string, responseStatus: number) {
   const upstreamCode = typeof error.code === 'string' || typeof error.code === 'number' ? error.code : undefined;
   return new ProviderResponseError(failureCode, upstreamMessage ?? 'Provider returned an error envelope', {
     status: upstreamStatus ?? (responseStatus >= 400 ? responseStatus : undefined), upstreamCode, upstreamMessage,
-    retryable: retryableStatus(upstreamStatus),
+    retryable: retryableStatus(upstreamStatus), retryAfterMs: responseRetryAfterMs,
   });
 }
 
@@ -168,10 +176,11 @@ export function createOpenAICompatibleModel(trace: Trace, task: string, selectio
             model: selection.model.identifier, request, attempt, status: response.status, duration_ms: Date.now() - started,
             raw_chars: responseWire.chars, raw_sha256: responseWire.sha256, raw_truncated: responseWire.truncated,
             raw_excerpt: responseWire.excerpt });
-          const envelopeError = providerResponseError(raw, response.status);
+          const responseRetryAfterMs = retryAfterDelay(response.headers.get('retry-after'));
+          const envelopeError = providerResponseError(raw, response.status, responseRetryAfterMs);
           if (envelopeError) throw envelopeError;
           if (!response.ok) throw new ProviderResponseError(failureCodeForStatus(response.status), 'Provider HTTP error', {
-            status: response.status, retryable: retryableStatus(response.status),
+            status: response.status, retryable: retryableStatus(response.status), retryAfterMs: responseRetryAfterMs,
           });
           if (body.stream && !hasSseDoneMarker(raw)) throw Object.assign(new Error('Incomplete provider stream'), {
             code: 'ECONNRESET', retryAfter: response.headers.get('retry-after') ?? undefined,

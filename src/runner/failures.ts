@@ -1,9 +1,12 @@
 import { ModelOutputTruncated } from '../harness/runtime.ts';
 import { ProviderResponseError, ProviderUnavailable, providerError, type ProviderFailureCode } from '../harness/retry.ts';
 import { ModelAdapterError } from '../models/types.ts';
+import { ControlPlaneError } from '../control-plane/errors.ts';
+import { GitLabHttpError } from '../scm/gitlab/client.ts';
 
-export type FailureCategory = 'provider' | 'model' | 'github' | 'workspace' | 'internal';
+export type FailureCategory = 'provider' | 'model' | 'scm' | 'workspace' | 'internal';
 export type FailureAction = 'retry' | 'check_configuration' | 'human_review' | 'inspect_logs';
+export type ScmPlatform = 'github' | 'gitlab';
 
 export interface RunFailure {
   code: string;
@@ -14,10 +17,18 @@ export interface RunFailure {
   upstream_status?: number;
   upstream_code?: string | number;
   attempts?: number;
+  scm_platform?: ScmPlatform;
+}
+
+function sanitize(value: string) {
+  return value
+    .replace(/glpat-[A-Za-z0-9_-]+/g, '[REDACTED]')
+    .replace(/(?:PRIVATE-TOKEN|GITLAB_TOKEN|Authorization)\s*[:=]\s*[^\s,;]+/gi, '$1: [REDACTED]');
 }
 
 function clip(value: string, max = 1000) {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const safe = sanitize(value);
+  return safe.length > max ? `${safe.slice(0, max)}…` : safe;
 }
 
 function providerFailure(code: ProviderFailureCode | 'provider_unavailable', details: {
@@ -52,13 +63,56 @@ export function classifyRunFailure(error: unknown): RunFailure {
   }
 
   const facts = providerError(error);
+  const providerCode = facts.failure_code;
+  if (providerCode && ['provider_upstream_unavailable', 'provider_auth_failed', 'provider_request_rejected',
+    'provider_configuration_error', 'provider_protocol_error'].includes(providerCode)) {
+    return providerFailure(providerCode as ProviderFailureCode, { message: facts.upstream_message ?? (error as Error)?.message ?? String(error),
+      retryable: facts.retryable, status: facts.upstream_status, upstreamCode: facts.upstream_code, attempts: facts.attempts });
+  }
+  if (error instanceof ControlPlaneError && (error.code === 'provider_unavailable'
+      || error.code === 'invalid_configuration' && (/provider|model|credential|request option/i.test(error.message)))) {
+    return providerFailure('provider_configuration_error', { message: error.message, retryable: false });
+  }
+  const errorStatus = facts.status;
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  if (error instanceof GitLabHttpError || error instanceof Error && error.name === 'GitLabHttpError') {
+    const status = error instanceof GitLabHttpError ? error.status : errorStatus;
+    const message = clip(errorMessage);
+    if (/invalid json|protocol|returned invalid/i.test(errorMessage)) {
+      return { code: 'gitlab_protocol_error', category: 'scm', scm_platform: 'gitlab', retryable: false,
+        user_action: 'inspect_logs', message, ...(status === undefined ? {} : { upstream_status: status }),
+        ...(facts.upstream_code === undefined ? {} : { upstream_code: facts.upstream_code }) };
+    }
+    if (status === 401 || status === 403) {
+      return { code: 'gitlab_auth_failed', category: 'scm', scm_platform: 'gitlab', retryable: false,
+        user_action: 'check_configuration', message, upstream_status: status,
+        ...(facts.upstream_code === undefined ? {} : { upstream_code: facts.upstream_code }) };
+    }
+    if (status === undefined || status === 408 || status === 429 || status >= 500) {
+      return { code: 'gitlab_unavailable', category: 'scm', scm_platform: 'gitlab', retryable: true,
+        user_action: 'retry', message, ...(status === undefined ? {} : { upstream_status: status }),
+        ...(facts.upstream_code === undefined ? {} : { upstream_code: facts.upstream_code }) };
+    }
+    return { code: 'gitlab_request_rejected', category: 'scm', scm_platform: 'gitlab', retryable: false,
+      user_action: 'check_configuration', message, upstream_status: status,
+      ...(facts.upstream_code === undefined ? {} : { upstream_code: facts.upstream_code }) };
+  }
+  if (facts.code === 'GITLAB_CONFIGURATION_ERROR') {
+    return { code: 'gitlab_auth_failed', category: 'scm', scm_platform: 'gitlab', retryable: false,
+      user_action: 'check_configuration', message: clip(errorMessage) };
+  }
+  if (facts.code === 'GITLAB_NETWORK_ERROR' || /GitLab request failed/i.test(errorMessage) && facts.code) {
+    return { code: 'gitlab_unavailable', category: 'scm', scm_platform: 'gitlab', retryable: true,
+      user_action: 'retry', message: clip(errorMessage), ...(facts.upstream_status === undefined ? {} : { upstream_status: facts.upstream_status }),
+      ...(facts.upstream_code === undefined ? {} : { upstream_code: facts.upstream_code }) };
+  }
   if (error instanceof Error && (error.name === 'HttpError' || error.name === 'RequestError')) {
     const retryable = facts.status === undefined || facts.status === 408 || facts.status === 429 || facts.status >= 500;
-    return { code: 'github_unavailable', category: 'github', retryable, user_action: retryable ? 'retry' : 'human_review',
+    return { code: 'github_unavailable', category: 'scm', scm_platform: 'github', retryable, user_action: retryable ? 'retry' : 'human_review',
       message: clip(error.message), ...(facts.status === undefined ? {} : { upstream_status: facts.status }) };
   }
   return { code: 'internal_error', category: 'internal', retryable: false, user_action: 'inspect_logs',
-    message: clip(error instanceof Error ? error.message : String(error)) };
+    message: clip(errorMessage) };
 }
 
 export function terminalStatusForFailure(failure: RunFailure) {

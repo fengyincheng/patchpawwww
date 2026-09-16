@@ -27,7 +27,8 @@ import { humanFeedback, hasHumanReplies, readHumanReplies } from './human-feedba
 import { parsePRIntent, parsePRTask } from './command.ts';
 import { prepareCloseStart, preparePendingCloseStart, runClose, retryPendingCloseCompletion, hasPendingClose, resumePendingClose, closeRefusalBody } from './close.ts';
 import { HumanHelpRequested } from '../tasks/human-help.ts';
-import { runNoticeBody, type HumanReply } from '../github/comments.ts';
+import { type HumanReply } from '../github/comments.ts';
+import { runNoticeBody } from './run-notice.ts';
 import { runConversation } from '../tasks/conversation/agent.ts';
 import { runCustom } from '../tasks/custom/agent.ts';
 import { runRepair } from '../tasks/repair.ts';

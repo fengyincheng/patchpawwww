@@ -17,6 +17,7 @@ export interface ProviderFailureDetails {
   upstreamMessage?: string;
   retryable?: boolean;
   attempts?: number;
+  retryAfterMs?: number;
 }
 
 export class ProviderResponseError extends Error {
@@ -40,7 +41,8 @@ export function providerError(error: unknown) {
     retryable: e.retryable ?? details.retryable, attempts: details.attempts };
 }
 export function retryAfterMs(error: unknown) {
-  const e = error as { retryAfter?: string | number; response?: { headers?: Record<string, string | number | undefined> }; headers?: Record<string, string | number | undefined> };
+  const e = error as { retryAfter?: string | number; response?: { headers?: Record<string, string | number | undefined> }; headers?: Record<string, string | number | undefined>; details?: ProviderFailureDetails };
+  if (e.details?.retryAfterMs !== undefined) return e.details.retryAfterMs;
   const headers = e.response?.headers ?? e.headers ?? {};
   const value = e.retryAfter ?? headers['retry-after'] ?? headers['Retry-After'];
   if (value === undefined) return undefined;

@@ -1,7 +1,7 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createGitHub, type GitHubReader } from '../github/client.ts';
-import { runNoticeBody } from '../github/comments.ts';
+import { runNoticeBody } from './run-notice.ts';
 import { loadCommandSnapshot } from '../control-plane/index.ts';
 import { Trace } from '../harness/trace.ts';
 import { disposeWorkspacePath, isManagedWorktree } from '../workspace/repo-store.ts';
