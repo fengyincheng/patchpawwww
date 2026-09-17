@@ -1,8 +1,12 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Readable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { TraceReader } from '../src/observability/trace-reader.ts';
 import { Trace } from '../src/harness/trace.ts';
 import { normalizeObservableEvent } from '../src/observability/normalize.ts';
@@ -12,7 +16,127 @@ import { statePath } from '../src/runner/state.ts';
 import { listRunManifests, resolveRun } from '../src/observability/run-resolver.ts';
 import { summarizeRun } from '../src/observability/run-summary.ts';
 import { renderObservableEvent, renderObserverNotice, renderRunList, renderSummary } from '../src/observability/renderer.ts';
-import { parseTargetCommandArgs, parseRunsArgs } from '../src/observability/cli-options.ts';
+import { parseTargetCommandArgs, parseRunsArgs, TARGET_COMMAND_HELP } from '../src/observability/cli-options.ts';
+
+const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+interface ObserverProcess {
+  child: ChildProcessByStdio<null, Readable, Readable>;
+  get stdout(): string;
+  get stderr(): string;
+  waitFor(fragment: string): Promise<void>;
+  finish(): Promise<{ code: number | null; stdout: string; stderr: string }>;
+  stop(): Promise<void>;
+}
+
+function startObserver(home: string, args: string[], testContext?: TestContext): ObserverProcess {
+  const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/agent-open.ts', ...args], {
+    cwd: PROJECT_ROOT,
+    env: { ...process.env, PATCHPAW_HOME: home, NO_COLOR: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const stop = () => new Promise<void>(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+    const done = () => { child.off('close', done); child.off('error', done); resolve(); };
+    child.once('close', done);
+    child.once('error', done);
+    child.kill('SIGKILL');
+  });
+  const finish = () => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    let timedOut = false;
+    const cleanup = () => { clearTimeout(timer); child.off('error', onError); child.off('close', onClose); };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onClose = (code: number | null) => {
+      cleanup();
+      if (timedOut) reject(new Error(`observer did not exit; stdout=${stdout}; stderr=${stderr}`));
+      else resolve({ code, stdout, stderr });
+    };
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 10_000);
+    child.once('error', onError);
+    child.once('close', onClose);
+  });
+  const observer: ObserverProcess = {
+    child,
+    get stdout() { return stdout; },
+    get stderr() { return stderr; },
+    waitFor(fragment) {
+      if (stdout.includes(fragment)) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cleanup();
+          void stop().then(() => reject(new Error(`observer output did not contain ${fragment}; stdout=${stdout}; stderr=${stderr}`)));
+        }, 10_000);
+        const check = () => {
+          if (!stdout.includes(fragment)) return;
+          cleanup();
+          resolve();
+        };
+        const cleanup = () => {
+          clearTimeout(timer);
+          child.stdout.off('data', check);
+          child.off('close', onClose);
+        };
+        const onClose = () => {
+          cleanup();
+          reject(new Error(`observer exited before output ${fragment}; stdout=${stdout}; stderr=${stderr}`));
+        };
+        child.stdout.on('data', check);
+        child.once('close', onClose);
+        check();
+      });
+    },
+    finish,
+    stop,
+  };
+  if (testContext) testContext.after(() => observer.stop());
+  return observer;
+}
+
+async function observerHome(testContext: TestContext) {
+  const home = await mkdtemp(join(tmpdir(), 'patchpaw-observer-cli-'));
+  testContext.after(() => rm(home, { recursive: true, force: true }));
+  return home;
+}
+
+function runState(repo: string, changeNumber: number, runId: string, active: boolean) {
+  return { repo, pr_number: changeNumber, run_id: runId, current_head_sha: 'head-sha', phase: active ? 'review_running' : 'review_completed',
+    repair_attempts: 0, last_patchpaw_commit: null, waiting_for_ci: false, active, pid: process.pid, execution_id: 1 };
+}
+
+async function createCliRun(home: string, runId: string, options: { repo?: string; changeNumber?: number; trace?: string; result?: Record<string, unknown>; active?: boolean }) {
+  const repo = options.repo ?? 'owner/repo';
+  const changeNumber = options.changeNumber ?? 123;
+  const paths = patchpawPaths(home);
+  const directory = join(paths.runs, runId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'manifest.json'), JSON.stringify({ run_id: runId, repo, pr_number: changeNumber,
+    started_at: '2026-09-17T00:00:00.000Z', task_chain: ['review'], execution_id: 1 }) + '\n');
+  await writeFile(join(directory, 'trace.jsonl'), options.trace ?? '');
+  if (options.result) await writeFile(join(directory, 'result.json'), JSON.stringify(options.result) + '\n');
+  const stateFile = statePath(paths.state, repo, changeNumber);
+  await mkdir(join(stateFile, '..'), { recursive: true });
+  await writeFile(stateFile, JSON.stringify(runState(repo, changeNumber, runId, options.active ?? false)) + '\n');
+  const workspaceMarker = join(paths.workspaces, runId, 'marker.txt');
+  await mkdir(join(workspaceMarker, '..'), { recursive: true });
+  await writeFile(workspaceMarker, 'observer-fixture');
+  return { directory, tracePath: join(directory, 'trace.jsonl'), resultPath: join(directory, 'result.json'), statePath: stateFile, workspaceMarker };
+}
+
+async function hashFile(path: string) {
+  try { return createHash('sha256').update(await readFile(path)).digest('hex'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+}
+
+async function artifactSnapshot(paths: { directory: string; tracePath: string; resultPath: string; statePath: string; workspaceMarker: string }) {
+  return JSON.stringify(await Promise.all([join(paths.directory, 'manifest.json'), paths.tracePath, paths.resultPath, paths.statePath, paths.workspaceMarker]
+    .map(async path => [path, await hashFile(path)])));
+}
 
 test('TraceReader replays complete JSONL and waits for a partial trailing line', async () => {
   const root = await mkdtemp(join(tmpdir(), 'patchpaw-observer-reader-'));
@@ -274,6 +398,118 @@ test('observer notices remain one-line JSON records in JSON mode', () => {
   assert.match(detached.message, /not stopped/);
 });
 
+test('agent:open CLI replays a completed run and leaves runtime artifacts unchanged', async (t) => {
+  const home = await observerHome(t);
+  const paths = await createCliRun(home, 'completed-cli-run', {
+    trace: JSON.stringify({ event: 'execution_started', time: '2026-09-17T00:00:00.000Z', execution_id: 1 }) + '\n'
+      + JSON.stringify({ event: 'tool_end', time: '2026-09-17T00:00:01.000Z', tool: 'completed_tool', exit_code: 0 }) + '\n',
+    result: { status: 'review_completed', run_id: 'completed-cli-run', final_head_sha: 'head-sha' },
+  });
+  const before = await artifactSnapshot(paths);
+  const observer = startObserver(home, ['--run', 'completed-cli-run', '--all', '--compact'], t);
+  const finished = await observer.finish();
+  assert.equal(finished.code, 0, finished.stderr);
+  assert.match(finished.stdout, /TOOL RESULT completed_tool/);
+  assert.match(finished.stdout, /review_completed/);
+  assert.equal(await artifactSnapshot(paths), before);
+});
+
+test('agent:open CLI follows a live run once without duplicating appended events', async (t) => {
+  const home = await observerHome(t);
+  const paths = await createCliRun(home, 'live-cli-run', {
+    active: true,
+    trace: JSON.stringify({ event: 'phase', time: '2026-09-17T00:00:00.000Z', phase: 'inspect' }) + '\n',
+  });
+  const observer = startObserver(home, ['--run', 'live-cli-run', '--all', '--compact'], t);
+  await observer.waitFor('PHASE inspect');
+  await appendFile(paths.tracePath, JSON.stringify({ event: 'tool_start', time: '2026-09-17T00:00:01.000Z', tool: 'live_tool' }) + '\n');
+  await observer.waitFor('TOOL live_tool');
+  await appendFile(paths.tracePath, JSON.stringify({ event: 'tool_end', time: '2026-09-17T00:00:02.000Z', tool: 'live_tool', exit_code: 0 }) + '\n');
+  await observer.waitFor('TOOL RESULT live_tool');
+  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'live-cli-run' }) + '\n');
+  const finished = await observer.finish();
+  assert.equal(finished.code, 0, finished.stderr);
+  assert.equal((finished.stdout.match(/TOOL live_tool/g) ?? []).length, 1);
+  assert.equal(finished.stdout.split('\n').filter(line => /^\d{2}:\d{2}:\d{2} TOOL RESULT live_tool/.test(line)).length, 1);
+  assert.match(finished.stdout, /review_completed/);
+});
+
+test('agent:open CLI waits for a partial JSONL line until its newline arrives', async (t) => {
+  const home = await observerHome(t);
+  const paths = await createCliRun(home, 'partial-cli-run', {
+    active: true,
+    trace: JSON.stringify({ event: 'tool_start', time: '2026-09-17T00:00:00.000Z', tool: 'partial_tool' }),
+  });
+  const observer = startObserver(home, ['--run', 'partial-cli-run', '--all', '--compact'], t);
+  await observer.waitFor('PatchPaw Agent Observer');
+  assert.doesNotMatch(observer.stdout, /TOOL partial_tool/);
+  await appendFile(paths.tracePath, '\n');
+  await observer.waitFor('TOOL partial_tool');
+  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'partial-cli-run' }) + '\n');
+  const finished = await observer.finish();
+  assert.equal(finished.code, 0, finished.stderr);
+  assert.equal((finished.stdout.match(/TOOL partial_tool/g) ?? []).length, 1);
+});
+
+test('agent:open --wait attaches immediately to an exact active repo run', async (t) => {
+  const home = await observerHome(t);
+  const paths = await createCliRun(home, 'active-wait-run', {
+    active: true,
+    trace: JSON.stringify({ event: 'phase', time: '2026-09-17T00:00:00.000Z', phase: 'active_wait' }) + '\n',
+  });
+  const observer = startObserver(home, ['owner/repo', '123', '--wait', '--compact'], t);
+  await observer.waitFor('PHASE active_wait');
+  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'active-wait-run' }) + '\n');
+  const finished = await observer.finish();
+  assert.equal(finished.code, 0, finished.stderr);
+  assert.match(finished.stdout, /active_wait/);
+  assert.match(finished.stdout, /review_completed/);
+});
+
+test('agent:open --wait skips an old terminal run and attaches only to a new exact run', async (t) => {
+  const home = await observerHome(t);
+  await createCliRun(home, 'old-terminal-run', {
+    trace: JSON.stringify({ event: 'tool_end', time: '2026-09-17T00:00:00.000Z', tool: 'old_tool', exit_code: 0 }) + '\n',
+    result: { status: 'review_completed', run_id: 'old-terminal-run' },
+  });
+  await createCliRun(home, 'foreign-active-run', {
+    repo: 'other/repo',
+    active: true,
+    trace: JSON.stringify({ event: 'tool_end', time: '2026-09-17T00:00:00.500Z', tool: 'foreign_tool', exit_code: 0 }) + '\n',
+  });
+  const observer = startObserver(home, ['owner/repo', '123', '--wait', '--compact'], t);
+  await observer.waitFor('Waiting for the next PatchPaw run...');
+  assert.doesNotMatch(observer.stdout, /old_tool/);
+  const paths = await createCliRun(home, 'new-active-run', {
+    active: true,
+    trace: JSON.stringify({ event: 'phase', time: '2026-09-17T00:00:01.000Z', phase: 'new_exact_run' }) + '\n',
+  });
+  await observer.waitFor('PHASE new_exact_run');
+  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'new-active-run' }) + '\n');
+  const finished = await observer.finish();
+  assert.equal(finished.code, 0, finished.stderr);
+  assert.doesNotMatch(finished.stdout, /old_tool/);
+  assert.doesNotMatch(finished.stdout, /foreign_tool/);
+  assert.equal(finished.stdout.split('\n').filter(line => /^\d{2}:\d{2}:\d{2} PHASE new_exact_run/.test(line)).length, 1);
+  assert.match(finished.stdout, /review_completed/);
+});
+
+test('agent:open SIGINT detaches a real observer without mutating runtime artifacts', async (t) => {
+  const home = await observerHome(t);
+  const paths = await createCliRun(home, 'detach-cli-run', {
+    active: true,
+    trace: JSON.stringify({ event: 'phase', time: '2026-09-17T00:00:00.000Z', phase: 'detach_test' }) + '\n',
+  });
+  const before = await artifactSnapshot(paths);
+  const observer = startObserver(home, ['--run', 'detach-cli-run', '--all', '--compact'], t);
+  await observer.waitFor('PHASE detach_test');
+  observer.child.kill('SIGINT');
+  const finished = await observer.finish();
+  assert.equal(finished.code, 0, finished.stderr);
+  assert.match(finished.stdout, /Observer detached\. PatchPaw Agent was not stopped\./);
+  assert.equal(await artifactSnapshot(paths), before);
+});
+
 test('compact run lists include task and canonical target context', () => {
   const [line] = renderRunList([{
     runId: 'run-1', manifestPath: 'run-1/manifest.json', startedAt: '2026-09-16T00:00:00.000Z',
@@ -293,6 +529,11 @@ test('CLI options keep the repo entry point and exact run entry point unambiguou
   assert.equal(run.replay, 'all');
   assert.equal(run.mode, 'json');
   assert.deepEqual(parseRunsArgs(['--failed', '--limit', '5', '--repo', 'owner/repo']).repo, 'owner/repo');
+  assert.match(TARGET_COMMAND_HELP, /<repo> <PR\/MR number>.*\[--wait\]/);
+  assert.match(TARGET_COMMAND_HELP, /\n\s+npm run agent:open -- --run <run-id>/);
+  assert.doesNotMatch(TARGET_COMMAND_HELP.split('\n')[1]!, /--wait/);
   assert.throws(() => parseTargetCommandArgs(['--run', 'run-1', '--replay', '9'.repeat(30)], 'agent:open'), /safe integer/);
+  assert.throws(() => parseTargetCommandArgs(['--run', 'run-1', '--wait'], 'agent:open'), /requires the <repo> <PR\/MR number>/);
+  assert.throws(() => parseTargetCommandArgs(['owner/repo', '12', '--wait'], 'agent:status'), /only supported by agent:open/);
   assert.throws(() => parseRunsArgs(['--limit', '9'.repeat(30)]), /safe integer/);
 });

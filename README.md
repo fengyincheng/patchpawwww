@@ -229,7 +229,7 @@ npm run agent:status -- owner/repo 132
 npm run agent:runs -- --failed --limit 50
 ```
 
-`agent:open` 默认回放最近 50 条事件并继续跟随；可使用 `--all`、`--replay N`、`--compact`、`--verbose`、`--json` 和 `--wait`。按 `Ctrl+C` 只会让观察器脱离，Agent 仍会继续运行。
+`agent:open` 默认回放最近 50 条事件并继续跟随；可使用 `--all`、`--replay N`、`--compact`、`--verbose`、`--json` 和 `--wait`。`--wait` 只能用于 repo/PR 入口：当前有 active run 时立即 attach，只有历史 terminal run 时等待下一条 exact matching run。按 `Ctrl+C` 只会让观察器脱离，Agent 仍会继续运行。
 
 ### 停止与清理是两件事
 

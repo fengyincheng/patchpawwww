@@ -38,12 +38,16 @@ export function parseTargetCommandArgs(args: string[], command: string): TargetC
     else if (arg === '--compact') mode = modeFor(mode, 'compact');
     else if (arg === '--verbose') mode = modeFor(mode, 'verbose');
     else if (arg === '--json') mode = modeFor(mode, 'json');
-    else if (arg === '--wait') wait = true;
+    else if (arg === '--wait') {
+      if (command !== 'agent:open') throw new Error('--wait is only supported by agent:open.');
+      wait = true;
+    }
     else if (arg === '--help' || arg === '-h') return { target: {}, mode, replay, wait, help: true };
     else if (arg.startsWith('-')) throw new Error(`Unknown ${command} option: ${arg}`);
     else positionals.push(arg);
   }
   if (runId && positionals.length) throw new Error('--run cannot be combined with <repo> <PR/MR number>.');
+  if (runId && wait) throw new Error('--wait requires the <repo> <PR/MR number> entry point; it cannot be combined with --run.');
   if (runId) return { target: { runId }, mode, replay, wait, help: false };
   if (positionals.length !== 2 || !/^\d+$/.test(positionals[1]!)) throw new Error(`Usage: npm run ${command} -- <repo> <PR/MR number> | --run <run-id>`);
   repo = positionals[0]; changeNumber = Number(positionals[1]);
@@ -78,4 +82,10 @@ export function parseRunsArgs(args: string[]) {
   return { mode, failed, includeCorrupt, limit, repo, help: false };
 }
 
-export const TARGET_COMMAND_HELP = 'Usage: npm run agent:open -- <repo> <PR/MR number> | --run <run-id> [--replay N|--all] [--compact|--verbose|--json] [--wait]';
+export function targetCommandHelp(command: string) {
+  const wait = command === 'agent:open' ? ' [--wait]' : '';
+  return `Usage: npm run ${command} -- <repo> <PR/MR number> [--replay N|--all] [--compact|--verbose|--json]${wait}\n`
+    + `       npm run ${command} -- --run <run-id> [--replay N|--all] [--compact|--verbose|--json]`;
+}
+
+export const TARGET_COMMAND_HELP = targetCommandHelp('agent:open');

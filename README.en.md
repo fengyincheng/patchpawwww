@@ -224,6 +224,19 @@ When finished with the PR, send `@my-team-patchpaw /close`. This removes local c
 
 Close refuses while a task is active: send stop, wait for confirmation, then send close separately. Cleanup failures are recorded; another close retries cleanup without recreating deleted resources. An acknowledgement alone does not mean cleanup completed.
 
+### Local Agent Run observation
+
+On the same machine running PatchPaw, you can observe a local Agent Run in read-only mode. These commands do not query remote SCM services or control/stop the Agent:
+
+```sh
+npm run agent:open -- owner/repo 132
+npm run agent:open -- --run <run-id> --replay 20
+npm run agent:status -- owner/repo 132
+npm run agent:runs -- --failed --limit 50
+```
+
+`agent:open` replays the latest 50 events and follows the run by default; use `--all`, `--replay N`, `--compact`, `--verbose`, `--json` and `--wait` as needed. `--wait` is only valid with the repo/PR entry point: it attaches immediately to an active run, and waits for the next exact matching run when only a historical terminal run exists. Press `Ctrl+C` to detach the observer; the PatchPaw Agent continues running.
+
 ## Create a custom command: /explain
 
 Commands are repository-scoped and may use different models, prompts and skills without server code changes.
