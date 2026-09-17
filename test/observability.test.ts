@@ -494,6 +494,23 @@ test('agent:open --wait skips an old terminal run and attaches only to a new exa
   assert.match(finished.stdout, /review_completed/);
 });
 
+test('agent:open --wait catches a new run that completes between polls', async (t) => {
+  const home = await observerHome(t);
+  const observer = startObserver(home, ['owner/repo', '123', '--wait', '--all', '--compact'], t);
+  await observer.waitFor('Waiting for the next PatchPaw run...');
+  const paths = await createCliRun(home, 'completed-between-polls', {
+    trace: JSON.stringify({ event: 'tool_end', time: '2026-09-17T00:00:02.000Z', tool: 'completed_between_polls', exit_code: 0 }) + '\n',
+    result: { status: 'review_completed', run_id: 'completed-between-polls' },
+  });
+  const before = await artifactSnapshot(paths);
+  const finished = await observer.finish();
+  assert.equal(finished.code, 0, finished.stderr);
+  assert.equal((finished.stdout.match(/Waiting for the next PatchPaw run\.\.\./g) ?? []).length, 1);
+  assert.match(finished.stdout, /TOOL RESULT completed_between_polls/);
+  assert.match(finished.stdout, /review_completed/);
+  assert.equal(await artifactSnapshot(paths), before);
+});
+
 test('agent:open SIGINT detaches a real observer without mutating runtime artifacts', async (t) => {
   const home = await observerHome(t);
   const paths = await createCliRun(home, 'detach-cli-run', {

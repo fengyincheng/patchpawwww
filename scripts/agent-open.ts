@@ -20,19 +20,19 @@ function wait(milliseconds: number, signal: AbortSignal) {
 
 async function resolveWithWait(target: Parameters<typeof resolveRun>[0], signal: AbortSignal, mode: RenderMode) {
   let announced = false;
-  let ignoredTerminalRunId: string | undefined;
+  let baseline: { kind: 'none' } | { kind: 'terminal'; runId: string } | undefined;
   while (!signal.aborted) {
     try {
       const run = await resolveRun(target);
-      const terminal = run.state?.active !== true;
-      if (!terminal) return run;
-      if (ignoredTerminalRunId === undefined) ignoredTerminalRunId = run.runId;
-      else if (run.runId !== ignoredTerminalRunId) return run;
+      if (run.state?.active === true) return run;
+      if (baseline === undefined) baseline = { kind: 'terminal', runId: run.runId };
+      else if (baseline.kind === 'none' || run.runId !== baseline.runId) return run;
       if (!announced) { write(renderObserverNotice('waiting', mode)); announced = true; }
       await wait(500, signal);
     }
     catch (error) {
       if (!(error instanceof RunResolutionError) || error.code !== 'run_not_found' || !target.repo) throw error;
+      if (baseline === undefined) baseline = { kind: 'none' };
       if (!announced) { write(renderObserverNotice('waiting', mode)); announced = true; }
       await wait(500, signal);
     }
