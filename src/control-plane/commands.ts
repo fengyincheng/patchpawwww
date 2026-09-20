@@ -74,8 +74,10 @@ async function validateSkillBindings(transaction: ControlPlaneTransaction, repos
 }
 
 function validateCommandCombination(input: Pick<CommandInput, 'executionType' | 'permission'>) {
-  if (input.executionType === 'review' && input.permission !== 'read_only') throw new ControlPlaneError('invalid_configuration', 'Review commands must be read-only.', 'permission');
-  if (['repair', 'ci'].includes(input.executionType) && input.permission !== 'read_write') throw new ControlPlaneError('invalid_configuration', `${input.executionType} commands must be read-write.`, 'permission');
+  // Execution type describes task semantics. Permission describes workspace
+  // capability lifecycle and is intentionally independent: read_write_approval
+  // is valid for any task that has a plan-mode binding.
+  void input;
 }
 
 function requireMainPrompt(bindings: PromptBinding[] | undefined, enabled: boolean) {

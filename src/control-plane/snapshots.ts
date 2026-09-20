@@ -49,7 +49,7 @@ export interface CommandSnapshot {
   repository: { id: string; full_name: string };
   target: SnapshotTarget;
   template_type: 'conversation' | 'custom' | 'review' | 'repair' | 'ci' | 'conflict';
-  command?: { id: string; slash_name: string; revision: number; execution_type: string; permission: 'read_only' | 'read_write'; enabled: boolean };
+  command?: { id: string; slash_name: string; revision: number; execution_type: string; permission: 'read_only' | 'read_write' | 'read_write_approval'; enabled: boolean };
   conversation_profile?: { id: string; revision: number; permission: 'read_only'; enabled: boolean };
   composition: { output_contract: SnapshotOutputContract; parts: CommandSnapshotPart[] };
   /** Optional for legacy snapshots; new resolver snapshots freeze the effective cap here. */
@@ -209,12 +209,8 @@ export function validateCommandSnapshot(input: unknown, options: { allowLegacy?:
   }
   if (snapshot.target === 'command') {
     if (!snapshot.command) snapshotError('snapshot_corrupt', 'Command snapshot is missing command identity.', 'command');
-    if (snapshot.command.execution_type !== snapshot.template_type || !['read_only', 'read_write'].includes(snapshot.command.permission)) {
+    if (snapshot.command.execution_type !== snapshot.template_type || !['read_only', 'read_write', 'read_write_approval'].includes(snapshot.command.permission)) {
       snapshotError('snapshot_corrupt', 'Command snapshot template and permission do not match.', 'command');
-    }
-    if ((['review'].includes(snapshot.template_type) && snapshot.command.permission !== 'read_only') ||
-        (['repair', 'ci'].includes(snapshot.template_type) && snapshot.command.permission !== 'read_write')) {
-      snapshotError('snapshot_corrupt', 'Command snapshot permission is incompatible with its template.', 'command.permission');
     }
   } else if (snapshot.target === 'conversation') {
     if (!snapshot.conversation_profile) snapshotError('snapshot_corrupt', 'Conversation snapshot is missing profile identity.', 'conversation_profile');
@@ -227,8 +223,15 @@ export function validateCommandSnapshot(input: unknown, options: { allowLegacy?:
   }
   const expectedOutput = outputContractForTemplate(snapshot.template_type);
   const actualOutput = snapshot.composition.output_contract;
-  if (actualOutput.kind !== expectedOutput.kind || (expectedOutput.schemaId && actualOutput.schema_id !== expectedOutput.schemaId) ||
-      (!expectedOutput.schemaId && actualOutput.schema_id !== undefined)) {
+  // Pre-opaque snapshots used strict JSON for review/conflict. They remain
+  // readable on the explicit compatibility path, while fresh resolver
+  // snapshots are marked control_plane and must use the natural-language
+  // contract.
+  const legacyStructuredOutput = snapshot.snapshot_origin !== 'control_plane'
+    && ['review', 'conflict'].includes(snapshot.template_type)
+    && actualOutput.kind === 'strict_json';
+  if (!legacyStructuredOutput && (actualOutput.kind !== expectedOutput.kind || (expectedOutput.schemaId && actualOutput.schema_id !== expectedOutput.schemaId) ||
+      (!expectedOutput.schemaId && actualOutput.schema_id !== undefined))) {
     snapshotError('snapshot_corrupt', 'Command snapshot output contract does not match its template.', 'output_contract');
   }
   if (!snapshot.provider.request_options || typeof snapshot.provider.request_options !== 'object' || Array.isArray(snapshot.provider.request_options)) {

@@ -14,3 +14,5 @@ export * from './resolver.ts';
 export * from './managed-repositories.ts';
 export * from './bootstrap.ts';
 export * from './scm-connections.ts';
+export * from './builtin-prompts.ts';
+export * from './builtin-migrations.ts';

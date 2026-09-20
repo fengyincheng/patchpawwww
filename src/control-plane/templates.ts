@@ -112,10 +112,10 @@ export function renderTemplateWithDiagnostics(content: string, values: Record<st
 export const validatePromptTemplate = validateTemplate;
 export const renderPromptTemplate = renderTemplate;
 
-export function outputContractForTemplate(templateType: TemplateType) {
+export function outputContractForTemplate(templateType: TemplateType): { kind: 'strict_json' | 'human_markdown' | 'none'; schemaId?: string } {
   switch (templateType) {
-    case 'review': return { kind: 'strict_json' as const, schemaId: 'review-result-v1' };
-    case 'conflict': return { kind: 'strict_json' as const, schemaId: 'conflict-proposal-v1' };
+    case 'review': return { kind: 'none' as const };
+    case 'conflict': return { kind: 'none' as const };
     case 'conversation': return { kind: 'human_markdown' as const };
     // Custom commands deliberately have no built-in output schema. Their selected
     // Prompt defines the task, and the resulting natural-language answer is published

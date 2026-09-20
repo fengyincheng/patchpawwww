@@ -7,7 +7,7 @@ export type ProviderType = typeof PROVIDER_TYPES[number];
 export const EXECUTION_TYPES = ['custom', 'review', 'repair', 'ci', 'conflict'] as const;
 export type ExecutionType = typeof EXECUTION_TYPES[number];
 
-export const PERMISSIONS = ['read_only', 'read_write'] as const;
+export const PERMISSIONS = ['read_only', 'read_write', 'read_write_approval'] as const;
 export type Permission = typeof PERMISSIONS[number];
 export type AssetScope = 'public' | 'repository';
 export type BindingKind = 'main' | 'common' | 'auxiliary';

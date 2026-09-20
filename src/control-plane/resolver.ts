@@ -9,6 +9,7 @@ import { outputContractForTemplate, validateTemplate, type TemplateType } from '
 import { COMMAND_SNAPSHOT_SCHEMA_VERSION, TOOLSET_VERSION, type CommandSnapshot, type CommandSnapshotPart, validateCommandSnapshot } from './snapshots.ts';
 import type { Command, ConversationProfile, PromptAsset, Provider, ProviderModel, SkillAsset } from './types.ts';
 import { resolveOutputBudget } from '../models/output-budget.ts';
+import { builtinPromptByRole, builtinPromptBySlug } from './builtin-prompts.ts';
 
 export type ResolveInput =
   | { kind: 'command'; repositoryId: string; commandId?: string; slashName?: string; executionId: string }
@@ -20,7 +21,7 @@ export interface ResolvedExecution {
   command?: { id: string; slashName: string; revision: number };
   conversationProfile?: { id: string; revision: number };
   executionType: TemplateType;
-  permission: 'read_only' | 'read_write';
+  permission: 'read_only' | 'read_write' | 'read_write_approval';
   outputContract: ReturnType<typeof outputContractForTemplate>;
   provider: Provider;
   model: ProviderModel;
@@ -94,10 +95,10 @@ function requiredPromptRoles(executionType: TemplateType) {
   switch (executionType) {
     case 'conversation': return ['conversation'];
     case 'custom': return [];
-    case 'review': return ['review', 'review-json-retry'];
-    case 'ci': return ['ci-repair', 'repair-completion', 'repair-feedback', 'repair-no-verification', 'repair-verification-empty'];
-    case 'conflict': return ['conflict', 'repair-completion', 'repair-feedback', 'repair-no-verification', 'repair-verification-empty'];
-    case 'repair': return ['repair-completion', 'repair-feedback', 'repair-no-verification', 'repair-verification-empty'];
+    case 'review': return ['review'];
+    case 'ci': return ['ci-repair'];
+    case 'conflict': return ['conflict'];
+    case 'repair': return [];
   }
 }
 
@@ -139,13 +140,16 @@ async function resolveInTransaction(transaction: ControlPlaneTransaction, input:
   const repository = repositoryFromRow(repositoryRow.rows[0]);
   const loaded = await loadTarget(transaction, input);
   const { prompts, skills } = mapBoundAssets(repository.id, loaded.promptRows, loaded.skillRows);
+  for (const bound of prompts) {
+    const legacy = [builtinPromptBySlug(bound.asset.slug), builtinPromptByRole(bound.asset.role)].find(value => value && !value.newRuns);
+    if (legacy && bound.binding.enabled && bound.asset.enabled) {
+      throw new ControlPlaneError('invalid_configuration', `Legacy-only Prompt cannot participate in a new execution: ${legacy.slug}`, 'prompt_binding');
+    }
+  }
   const targetEnabled = input.kind === 'command' ? loaded.target!.enabled : loaded.profile!.enabled;
   if (!targetEnabled) throw new ControlPlaneError('required_binding', 'The selected command/profile is disabled.', input.kind);
   const executionType: TemplateType = input.kind === 'conversation' ? 'conversation' : loaded.target!.executionType;
   const permission = input.kind === 'conversation' ? 'read_only' : loaded.target!.permission;
-  if ((executionType === 'review' && permission !== 'read_only') || (['repair', 'ci'].includes(executionType) && permission !== 'read_write')) {
-    throw new ControlPlaneError('invalid_configuration', `${executionType} command has an invalid permission combination.`, 'permission');
-  }
   const mainBindings = prompts.filter(value => value.binding.enabled && value.binding.bindingKind === 'main' && value.asset.enabled);
   if (!mainBindings.length) throw new ControlPlaneError('required_binding', `Enabled ${input.kind} requires a main prompt binding.`, 'prompt_binding');
   const mainRole = requiredMainRole(executionType);
@@ -153,6 +157,9 @@ async function resolveInTransaction(transaction: ControlPlaneTransaction, input:
   const activeRoles = new Set(prompts.filter(value => value.binding.enabled && value.asset.enabled).map(value => value.asset.role).filter((value): value is string => Boolean(value)));
   const missingRoles = requiredPromptRoles(executionType).filter(role => !activeRoles.has(role));
   if (missingRoles.length) throw new ControlPlaneError('required_binding', `Required prompt role is missing: ${missingRoles.join(', ')}`, 'prompt_binding');
+  if (permission === 'read_write_approval' && !activeRoles.has('plan-mode')) {
+    throw new ControlPlaneError('required_binding', 'Read + write (approval required) commands need an enabled plan-mode Prompt binding.', 'prompt_binding');
+  }
   const modelRow = await transaction.execute(`SELECT m.*, p.type, p.display_name AS provider_display_name, p.base_url, p.credential_ref,
       p.request_options_json, p.enabled AS provider_enabled, p.revision AS provider_revision,
       p.created_at AS provider_created_at, p.updated_at AS provider_updated_at
@@ -191,7 +198,7 @@ async function resolveInTransaction(transaction: ControlPlaneTransaction, input:
     }
   }
   const snapshot: CommandSnapshot = {
-    schema_version: COMMAND_SNAPSHOT_SCHEMA_VERSION, snapshot_id: `snap-${createId()}`, execution_id: input.executionId,
+    schema_version: COMMAND_SNAPSHOT_SCHEMA_VERSION, snapshot_id: `snap-${createId()}`, snapshot_origin: 'control_plane', execution_id: input.executionId,
     repository: { id: repository.id, full_name: repository.fullNameNormalized }, target: input.kind, template_type: executionType,
     ...(input.kind === 'command' ? { command: { id: loaded.target!.id, slash_name: loaded.target!.slashName, revision: loaded.target!.revision,
       execution_type: loaded.target!.executionType, permission: loaded.target!.permission, enabled: loaded.target!.enabled } } :

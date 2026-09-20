@@ -226,7 +226,7 @@ export interface AdminEffectiveDto {
   command?: { id: string; slash_name: string; revision: number };
   conversation_profile?: { id: string; revision: number; permission: 'read_only' };
   execution_type: string;
-  permission: 'read_only' | 'read_write';
+  permission: 'read_only' | 'read_write' | 'read_write_approval';
   output_contract: { kind: string; schema_id?: string };
   provider: {
     id: string;
@@ -303,7 +303,7 @@ const modelPatchSchema = modelCreateSchema.partial().extend({ expected_revision:
 const credentialSchema = z.object({ credential: z.string().min(1).max(16 * 1024), expected_revision: revisionSchema.optional() }).strict();
 const commandFields = {
   slash_name: z.string().min(1).max(64), display_name: z.string().max(200), description: z.string().max(2000).optional(),
-  execution_type: z.enum(['custom', 'review', 'repair', 'ci', 'conflict']), permission: z.enum(['read_only', 'read_write']),
+  execution_type: z.enum(['custom', 'review', 'repair', 'ci', 'conflict']), permission: z.enum(['read_only', 'read_write', 'read_write_approval']),
   provider_model_id: z.string().min(1).max(128), enabled: z.boolean().optional(),
   prompt_bindings: z.array(promptBindingSchema).max(64).optional(), skill_bindings: z.array(skillBindingSchema).max(64).optional(),
 };

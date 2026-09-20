@@ -1,7 +1,7 @@
 import type { Client } from '@libsql/client';
 
-export const CONTROL_PLANE_SCHEMA_VERSION = '3';
-export const CONTROL_PLANE_MIGRATION_VERSION = 3;
+export const CONTROL_PLANE_SCHEMA_VERSION = '4';
+export const CONTROL_PLANE_MIGRATION_VERSION = 4;
 
 /**
  * The control plane has its own schema and lifecycle. It deliberately does not
@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS control_plane_meta (
 CREATE TABLE IF NOT EXISTS control_plane_migrations (
   version INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS builtin_asset_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL,
+  report_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS repositories (
@@ -139,7 +145,7 @@ CREATE TABLE IF NOT EXISTS commands (
   display_name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   execution_type TEXT NOT NULL CHECK (execution_type IN ('custom', 'review', 'repair', 'ci', 'conflict')),
-  permission TEXT NOT NULL CHECK (permission IN ('read_only', 'read_write')),
+  permission TEXT NOT NULL CHECK (permission IN ('read_only', 'read_write', 'read_write_approval')),
   provider_model_id TEXT NOT NULL REFERENCES provider_models(id) ON DELETE RESTRICT,
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
@@ -295,6 +301,53 @@ const SCM_REPOSITORY_COLUMNS: Record<string, string> = {
   storage_key: "TEXT NOT NULL DEFAULT ''",
 };
 
+// SQLite cannot alter a CHECK constraint in place. Rebuild only the command
+// tables so existing commands and their bindings survive the addition of the
+// approval-gated write capability.
+const APPROVAL_PERMISSION_MIGRATION = `
+ALTER TABLE command_prompts RENAME TO command_prompts_v2;
+ALTER TABLE command_skills RENAME TO command_skills_v2;
+ALTER TABLE commands RENAME TO commands_v2;
+CREATE TABLE commands (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+  slash_name TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  execution_type TEXT NOT NULL CHECK (execution_type IN ('custom', 'review', 'repair', 'ci', 'conflict')),
+  permission TEXT NOT NULL CHECK (permission IN ('read_only', 'read_write', 'read_write_approval')),
+  provider_model_id TEXT NOT NULL REFERENCES provider_models(id) ON DELETE RESTRICT,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(repository_id, slash_name)
+);
+CREATE TABLE command_prompts (
+  command_id TEXT NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+  prompt_asset_id TEXT NOT NULL REFERENCES prompt_assets(id) ON DELETE RESTRICT,
+  position INTEGER NOT NULL CHECK (position > 0),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  binding_kind TEXT NOT NULL DEFAULT 'main' CHECK (binding_kind IN ('main', 'common', 'auxiliary')),
+  PRIMARY KEY(command_id, position),
+  UNIQUE(command_id, prompt_asset_id)
+);
+CREATE TABLE command_skills (
+  command_id TEXT NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+  skill_asset_id TEXT NOT NULL REFERENCES skill_assets(id) ON DELETE RESTRICT,
+  position INTEGER NOT NULL CHECK (position > 0),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  PRIMARY KEY(command_id, position),
+  UNIQUE(command_id, skill_asset_id)
+);
+INSERT INTO commands SELECT * FROM commands_v2;
+INSERT INTO command_prompts SELECT * FROM command_prompts_v2;
+INSERT INTO command_skills SELECT * FROM command_skills_v2;
+DROP TABLE command_prompts_v2;
+DROP TABLE command_skills_v2;
+DROP TABLE commands_v2;
+`;
+
 export async function ensureControlPlaneSchema(client: Client) {
   await client.execute('PRAGMA foreign_keys=ON');
   await client.execute(`CREATE TABLE IF NOT EXISTS control_plane_meta (
@@ -310,7 +363,7 @@ export async function ensureControlPlaneSchema(client: Client) {
   if (!Number.isInteger(current) || current > CONTROL_PLANE_MIGRATION_VERSION) {
     throw new Error(`Unsupported control-plane migration version: ${current}`);
   }
-  if (current < CONTROL_PLANE_MIGRATION_VERSION) {
+      if (current < CONTROL_PLANE_MIGRATION_VERSION) {
     const repositoryInfo = await client.execute('PRAGMA table_info(repositories)');
     const repositoryColumns = new Set(repositoryInfo.rows.map(row => String(row.name)));
     const transaction = await client.transaction('write');
@@ -322,6 +375,7 @@ export async function ensureControlPlaneSchema(client: Client) {
         }
         await transaction.executeMultiple(SCM_MIGRATION);
       }
+      if (current >= 1) await transaction.executeMultiple(APPROVAL_PERMISSION_MIGRATION);
       await transaction.executeMultiple(CONTROL_PLANE_SCHEMA);
       await transaction.execute({ sql: `INSERT INTO control_plane_migrations(version, applied_at) VALUES (:version, :applied_at)
         ON CONFLICT(version) DO NOTHING`, args: { version: CONTROL_PLANE_MIGRATION_VERSION, applied_at: new Date().toISOString() } });

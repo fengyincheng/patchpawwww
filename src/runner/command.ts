@@ -8,7 +8,7 @@ export type ReservedControl = 'stop' | 'close' | 'approval';
 export type ParsedIntent =
   | { kind: 'conversation'; repositoryId: string; reason?: 'plain_mention' | 'unknown_command' | 'disabled_command' | 'ambiguous_command' }
   | { kind: 'control'; control: ReservedControl }
-  | { kind: 'command'; commandId: string; slashName: string; executionType: ExecutionType; permission: 'read_only' | 'read_write' };
+  | { kind: 'command'; commandId: string; slashName: string; executionType: ExecutionType; permission: 'read_only' | 'read_write' | 'read_write_approval' };
 
 const STATIC_COMMANDS = new Set(['conflict', 'confict', 'review', 'ci', 'stop', 'close']);
 const RESERVED_CONTROLS = new Set<ReservedControl>(['stop', 'close', 'approval']);

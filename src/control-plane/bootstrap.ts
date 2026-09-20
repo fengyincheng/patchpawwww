@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { withFileLock } from '../platform/lock.ts';
 import { patchpawPaths } from '../config/paths.ts';
@@ -12,6 +12,7 @@ import { repositoryFromRow } from './common.ts';
 import { discoverManagedRepositories } from './managed-repositories.ts';
 import { promptFromRow } from './prompts.ts';
 import { skillFromRow } from './skills.ts';
+import { builtinPromptBySlug, publicBuiltinPrompts } from './builtin-prompts.ts';
 import type { BootstrapOptions, BootstrapReport, BootstrapRepositoryInput, PromptAsset, Provider, ProviderModel, Repository, SkillAsset } from './types.ts';
 
 export const CONTROL_PLANE_BOOTSTRAP_VERSION = 'patchpaw-bootstrap-v1';
@@ -23,12 +24,13 @@ interface SourceSkill { slug: string; title: string; description: string; conten
 
 async function sourcePrompts(root: string) {
   const result: SourcePrompt[] = [];
-  for (const entry of (await readdir(root)).filter(value => value.endsWith('.md')).sort()) {
-    const slug = normalizeAssetSlug(entry.slice(0, -3));
+  for (const definition of publicBuiltinPrompts()) {
+    const slug = normalizeAssetSlug(definition.slug);
+    const sourceFile = definition.source.replace(/^operation\//, '');
     const content = root === defaultOperationRoot
-      ? loadOperation(slug)
-      : (await readFile(join(root, entry), 'utf8')).replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
-    result.push({ slug, title: slug, role: slug, content, digest: contentDigest(content) });
+      ? loadOperation(sourceFile.slice(0, -3))
+      : (await readFile(join(root, sourceFile), 'utf8')).replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
+    result.push({ slug, title: slug, role: definition.role, content, digest: contentDigest(content) });
   }
   return result;
 }
@@ -146,6 +148,8 @@ async function copyAssetsForRepository(transaction: ControlPlaneTransaction, rep
   const prompts: PromptAsset[] = [];
   let createdAny = false;
   for (const source of publicPrompts) {
+    const definition = builtinPromptBySlug(source.slug);
+    if (definition && !definition.newRuns) continue;
     const found = await transaction.execute('SELECT * FROM prompt_assets WHERE scope = \'repository\' AND repository_id = :repository_id AND slug = :slug', { repository_id: repository.id, slug: source.slug });
     if (found.rows[0]) { prompts.push(promptFromRow(found.rows[0])); continue; }
     const marker = await findMarker(transaction, repository.id, `prompt:${source.slug}`);
@@ -189,9 +193,12 @@ async function builtInCommand(transaction: ControlPlaneTransaction, repository: 
     // Converge only that owned record; an operator override remains entirely
     // under control-plane ownership and is allowed to fail closed in the resolver.
     if (marker?.state !== 'seeded') return commandId;
+    if (name === 'conflict' && String(found.rows[0].permission) === 'read_write') {
+      await transaction.execute('UPDATE commands SET permission = \'read_write_approval\', revision = revision + 1, updated_at = :updated_at WHERE id = :id', { id: commandId, updated_at: isoNow() });
+    }
     const auxiliaryRoles = name === 'review'
       ? ['stop-closeout']
-      : ['repair-completion', 'repair-feedback', 'repair-no-verification', 'repair-verification-empty', 'repair-closeout', 'stop-closeout'];
+      : ['repair-closeout', 'stop-closeout', ...(name === 'conflict' ? ['plan-mode'] : [])];
     const bound = await transaction.execute(`SELECT b.position, p.role
       FROM command_prompts b JOIN prompt_assets p ON p.id = b.prompt_asset_id WHERE b.command_id = :id`, { id: commandId });
     const boundRoles = new Set(bound.rows.map(row => String(row.role ?? '')));
@@ -219,12 +226,12 @@ async function builtInCommand(transaction: ControlPlaneTransaction, repository: 
   if (marker?.state === 'tombstone' || marker?.state === 'disabled') throw new ControlPlaneError('required_binding', `Built-in command was explicitly removed: /${name}`);
   const mainRole = name === 'review' ? 'review' : name === 'ci' ? 'ci-repair' : 'conflict';
   const auxiliaryRoles = name === 'review'
-    ? ['review-json-retry', 'stop-closeout']
-    : ['repair-completion', 'repair-feedback', 'repair-no-verification', 'repair-verification-empty', 'repair-closeout', 'stop-closeout'];
+    ? ['stop-closeout']
+    : ['repair-closeout', 'stop-closeout', ...(name === 'conflict' ? ['plan-mode'] : [])];
   const main = prompts.find(asset => asset.role === mainRole && asset.enabled);
   const auxiliary = auxiliaryRoles.map(role => prompts.find(asset => asset.role === role && asset.enabled));
   if (!main || auxiliary.some(asset => !asset) || !shared.enabled || !humanHelp.enabled) throw new ControlPlaneError('required_binding', `Required bootstrap asset is unavailable for /${name}`);
-  const now = isoNow(); const id = createId(); const permission = name === 'review' ? 'read_only' : 'read_write'; const executionType = name;
+  const now = isoNow(); const id = createId(); const permission = name === 'review' ? 'read_only' : name === 'conflict' ? 'read_write_approval' : 'read_write'; const executionType = name;
   await transaction.execute(`INSERT INTO commands(id, repository_id, slash_name, display_name, description, execution_type, permission, provider_model_id, enabled, revision, created_at, updated_at)
     VALUES (:id, :repository_id, :slash_name, :display_name, :description, :execution_type, :permission, :provider_model_id, 1, 1, :created_at, :updated_at)`, {
     id, repository_id: repository.id, slash_name: name, display_name: name === 'ci' ? '/CI' : `/${name}`, description: `Built-in ${name} command`, execution_type: executionType,
