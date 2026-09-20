@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { escapeGitLabQuickActions, GitLabClient } from './client.ts';
 import { normalizeGitLabPath, storageKey } from '../identity.ts';
 import type { ActorAuthorization, ChangeRequestSnapshot, InboundScmComment, ScmAdapter, ScmCiState, ScmConnection, ScmDeliveryReceipt } from '../types.ts';
-import type { ReviewResult } from '../../tasks/review/result.ts';
+import type { ReviewPayload } from '../../tasks/review/result.ts';
 import { ReviewStale } from '../errors.ts';
 
 const access = { guest: 10, reporter: 20, developer: 30, maintainer: 40, owner: 50 } as const;
@@ -83,8 +83,10 @@ export class GitLabAdapter implements ScmAdapter {
     return { id: Number(data.id), htmlUrl: String(data.web_url ?? data.url ?? ''), publishedAt: String(data.created_at ?? new Date().toISOString()), reused: false };
   }
 
-  async publishReview(projectId: string, number: number, headSha: string, review: ReviewResult, mentions: string[], marker: string) {
-    const body = `## PatchPaw review\n\n${mentions.map(value => `@${value}`).join(' ')}\n\nHead: \`${headSha}\`\n\n${review.summary}\n\nRecommendation: **${review.recommendation}**\n\n${review.findings.map(f => `- ${f.severity}: ${f.path}:${f.line} — ${f.title}\n  ${f.evidence}`).join('\n')}\n\nLimitations: ${review.limitations.join('; ') || 'None'}\n\n${marker}`;
+  async publishReview(projectId: string, number: number, headSha: string, review: ReviewPayload, mentions: string[], marker: string) {
+    const body = 'body' in review
+      ? `## PatchPaw review\n\n${mentions.map(value => `@${value}`).join(' ')}\n\nHead: \`${headSha}\`\n\n${review.body}\n\n${marker}`
+      : `## PatchPaw review\n\n${mentions.map(value => `@${value}`).join(' ')}\n\nHead: \`${headSha}\`\n\n${review.summary}\n\nRecommendation: **${review.recommendation}**\n\n${review.findings.map(f => `- ${f.severity}: ${f.path}:${f.line} — ${f.title}\n  ${f.evidence}`).join('\n')}\n\nLimitations: ${review.limitations.join('; ') || 'None'}\n\n${marker}`;
     const current = await this.readChangeRequest(projectId, number, { allowClosed: true });
     if (current.state !== 'opened' || current.source.sha !== headSha) {
       throw new ReviewStale(headSha, current.source.sha, current.state);

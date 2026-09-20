@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import { z } from 'zod';
 import { runNoticeBody, type RunNotice } from '../runner/run-notice.ts';
+import type { HumanReply as NormalizedHumanReply } from '../runner/human-reply.ts';
 
 // Kept as a compatibility export while the formatter is shared by GitHub and GitLab.
 export { runNoticeBody } from '../runner/run-notice.ts';
@@ -32,21 +33,8 @@ export function humanReply(payload: unknown, botLogin: string, sourceEventId?: s
     author_association: comment.author_association, ...(comment.created_at ? { created_at: comment.created_at } : {}),
     ...(sourceEventId ? { source_event_id: sourceEventId } : {}) };
 }
-export type HumanReply = Omit<NonNullable<ReturnType<typeof humanReply>>, 'installation_id' | 'author_association' | 'source_event_id'> & {
-  installation_id?: number;
-  /** Preserved from the signed webhook; legacy local inbox records may omit it. */
-  author_association?: string;
-  /** GitHub delivery identity, when the comment entered through the webhook. */
-  source_event_id?: string;
-  /** GitHub comment creation time, used to reject an approval that predates a newer proposal. */
-  created_at?: string;
-  /** SCM metadata is populated for GitLab comments; GitHub records retain the legacy shape. */
-  platform?: 'github' | 'gitlab';
-  connection_id?: string;
-  project_id?: string;
-  author_id?: string;
-  repository_path?: string;
-};
+/** Compatibility export for webhook callers; shared lifecycle code uses the normalized type. */
+export type HumanReply = NormalizedHumanReply;
 
 export function mentionUsers(users: (string | undefined)[]) {
   const unique = new Map<string, string>();

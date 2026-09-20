@@ -41,7 +41,7 @@ export async function waitForCI(client: Octokit, fullName: string, sha: string, 
   return last;
 }
 
-export async function failureEvidence(client: Octokit, fullName: string, ci: CIState, trace: Trace) {
+export async function failureEvidence(client: Octokit, fullName: string, ci: CIState, trace: Pick<Trace, 'emit'>) {
   const [owner, repo] = fullName.split('/');
   const jobs = [];
   for (const run of ci.workflowRuns.filter(r => r.conclusion && !['success', 'skipped', 'neutral'].includes(r.conclusion))) {

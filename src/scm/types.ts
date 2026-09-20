@@ -1,4 +1,4 @@
-import type { ReviewResult } from '../tasks/review/result.ts';
+import type { ReviewPayload } from '../tasks/review/result.ts';
 
 export const SCM_KINDS = ['github', 'gitlab'] as const;
 export type ScmKind = typeof SCM_KINDS[number];
@@ -118,7 +118,7 @@ export interface ScmAdapter {
   verifyInboundComment(comment: InboundScmComment): Promise<ActorAuthorization>;
   listComments(projectId: string, number: number): Promise<Array<{ id: number; author: string; authorId: string; body: string; url: string; createdAt?: string; system?: boolean }>>;
   publishComment(projectId: string, number: number, body: string, markers: string[]): Promise<ScmDeliveryReceipt>;
-  publishReview(projectId: string, number: number, headSha: string, review: ReviewResult, mentions: string[], marker: string): Promise<ScmDeliveryReceipt>;
+  publishReview(projectId: string, number: number, headSha: string, review: ReviewPayload, mentions: string[], marker: string): Promise<ScmDeliveryReceipt>;
   readCI(projectId: string, number: number, sha: string): Promise<ScmCiState>;
   failureEvidence(projectId: string, ci: ScmCiState): Promise<unknown>;
   installationGitToken?(): Promise<string>;

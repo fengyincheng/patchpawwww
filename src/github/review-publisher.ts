@@ -1,19 +1,20 @@
 import type { Octokit } from '@octokit/rest';
-import type { ReviewResult } from '../tasks/review/result.ts';
+import type { ReviewPayload } from '../tasks/review/result.ts';
 import { mentionUsers } from './comments.ts';
 import { ReviewStale } from '../scm/errors.ts';
 
 export { ReviewStale } from '../scm/errors.ts';
 
 export interface ReviewIdentity { runId: string; botLogin: string; allowLegacy?: boolean }
-function reviewBody(sha: string, result: ReviewResult, mentions: string[]) {
+function reviewBody(sha: string, result: ReviewPayload, mentions: string[]) {
+  if ('body' in result) return `## PatchPaw review\n\n${mentionUsers(mentions)}\n\nHead: \`${sha}\`\n\n${result.body}`;
   return `## PatchPaw P0 review\n\n${mentionUsers(mentions)}\n\nHead: \`${sha}\`\n\n${result.summary}\n\nRecommendation: **${result.recommendation}**\n\n`
     + result.findings.map(f => `- ${f.severity}: ${f.path}:${f.line} — ${f.title}\n  ${f.evidence}`).join('\n')
     + `\n\nLimitations: ${result.limitations.join('; ') || 'None reported'}`;
 }
 
 // Caller holds the per-PR worker lock. Normal runs and recovery use this same publisher.
-export async function publishReview(client: Octokit, fullName: string, number: number, sha: string, result: ReviewResult,
+export async function publishReview(client: Octokit, fullName: string, number: number, sha: string, result: ReviewPayload,
   mentions: string[], identity: ReviewIdentity, deliveryMarker?: string) {
   const [owner, repo] = fullName.split('/');
   const params = { owner, repo, pull_number: number };
