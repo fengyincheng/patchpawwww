@@ -78,8 +78,10 @@ export async function commitRepair(ws: WorkspaceState, kind: string, trace: Trac
   trace.emit('repair_commit', { kind, sha, start_head: startHead, source: needsCommit ? 'harness' : 'agent' });
   return sha;
 }
-export async function pushRepair(ws: WorkspaceState, branch: string, token: string, trace: Trace) {
-  return git(ws.path, ['push', 'origin', `HEAD:refs/heads/${branch}`], trace, gitAuth(token));
+export async function pushRepair(ws: WorkspaceState, branch: string, token: string, trace: Trace,
+  remoteUrl = 'https://github.com', credentialScopeUrl?: string) {
+  return git(ws.path, ['push', 'origin', `HEAD:refs/heads/${branch}`], trace,
+    gitAuth(token, remoteUrl, 'x-access-token', credentialScopeUrl));
 }
 export async function includesBase(ws: WorkspaceState, trace: Trace) {
   return (await git(ws.path, ['merge-base', '--is-ancestor', ws.mainSha, 'HEAD'], trace, undefined, true)).exitCode === 0;
