@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, writeFile, link, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { HumanReply } from '../github/comments.ts';
+import type { HumanReply } from './human-reply.ts';
 import { readState } from './state.ts';
 
 export async function saveHumanReply(path: string, reply: HumanReply) {
