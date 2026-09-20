@@ -9,6 +9,7 @@ import { dispatchHumanReply } from '../src/runner/dispatch.ts';
 import { humanReply } from '../src/github/comments.ts';
 import { hasHumanReplies, readHumanReplies, saveHumanReply, humanFeedback } from '../src/runner/human-feedback.ts';
 import { statePath, writeState, readState, type RunState } from '../src/runner/state.ts';
+import { parseRunPhase } from '../src/runner/phases.ts';
 import { startInboundVerifier } from '../src/runner/inbound-verification.ts';
 import { startCommunicationScheduler } from '../src/runner/communication-scheduler.ts';
 import { closeCommunicationStore, openCommunicationStore } from '../src/runner/communication-store.ts';
@@ -63,7 +64,7 @@ test('signed PR replies are persisted during an active run without starting anot
 test('human feedback carries the prior question and answers; delayed lower IDs and replies arriving mid-run remain pending', async () => {
   const root = await mkdtemp(join(tmpdir(), 'patchpaw-feedback-'));
   const path = statePath(join(root, 'data/state'), 'owner/lab', 7);
-  const previous = { ...state(), active: false, phase: 'needs_human' };
+  const previous = { ...state(), active: false, phase: parseRunPhase('needs_human') };
   await writeState(path, previous);
   await mkdir(join(root, 'runs/previous-run'), { recursive: true });
   const evidence = JSON.stringify({ status: 'needs_human', reason: '应该保留哪种行为？' });

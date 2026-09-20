@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Trace } from '../src/harness/trace.ts';
 import { claimRun, writeState, readState, statePath, type RunState } from '../src/runner/state.ts';
+import { parseRunPhase } from '../src/runner/phases.ts';
 import { hasRunnableWork } from '../src/runner/runnable.ts';
 import { enqueueCommentDelivery, enqueueReviewDelivery, deliverImmediately, listOutbound, wakeOutboundScheduler } from '../src/runner/outbound.ts';
 import { wakeCommunicationScheduler } from '../src/runner/communication-wake.ts';
@@ -111,7 +112,7 @@ test('scheduler reconciles state-only legacy completion, refusal and closing jou
   const root = await mkdtemp(join(tmpdir(), 'patchpaw-scheduler-state-'));
   const stateRoot = join(root, 'data/state');
   const base = (repo: string, pr_number: number, phase: string): RunState => ({ repo, pr_number, run_id: '', current_head_sha: '',
-    phase, repair_attempts: 0, last_patchpaw_commit: null, waiting_for_ci: false, active: false, pid: 2147483647, handled_comment_ids: [] });
+    phase: parseRunPhase(phase), repair_attempts: 0, last_patchpaw_commit: null, waiting_for_ci: false, active: false, pid: 2147483647, handled_comment_ids: [] });
   const completionPath = statePath(stateRoot, 'owner/completion', 7);
   await writeState(completionPath, { ...base('owner/completion', 7, 'closed'), close_comment_id: 701,
     closed_through_comment_id: 701, close_mentions: ['owner'], completion_notice_status: 'pending' });
