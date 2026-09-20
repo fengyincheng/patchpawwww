@@ -1,6 +1,13 @@
-import { createTaskSession, ModelOutputTruncated, parseResult, renderRuntimePrompt, templateValuesFromSeed, type TaskOptions } from '../../harness/runtime.ts';
+import { createTaskSession, ModelOutputTruncated, parseResult, renderRuntimePrompt, templateValuesFromSeed, type TaskOptions, type TaskAgentResult } from '../../harness/runtime.ts';
+import { runNaturalLanguageTask } from '../agent-outcome.ts';
 import { reviewResultSchema } from './result.ts';
-export async function runReview(options: Omit<TaskOptions, 'task' | 'prompt'>, seed: unknown) {
+
+type ReviewOptions = Omit<TaskOptions, 'task' | 'prompt'>;
+export function runReview(options: ReviewOptions & { opaqueOutcome: true }, seed: unknown): Promise<TaskAgentResult>;
+export function runReview(options: ReviewOptions & { opaqueOutcome?: false | undefined }, seed: unknown): Promise<ReturnType<typeof reviewResultSchema.parse>>;
+export function runReview(options: ReviewOptions, seed: unknown): Promise<ReturnType<typeof reviewResultSchema.parse>>;
+export async function runReview(options: ReviewOptions, seed: unknown): Promise<TaskAgentResult | ReturnType<typeof reviewResultSchema.parse>> {
+  if (options.opaqueOutcome) return await runOpaqueReview(options, seed);
   const session = createTaskSession({ ...options, task: 'review', prompt: '', readOnly: true, templateValues: templateValuesFromSeed(seed) });
   try {
     const first = await session.turnResult(JSON.stringify(seed));
@@ -22,4 +29,9 @@ export async function runReview(options: Omit<TaskOptions, 'task' | 'prompt'>, s
     if (!parsed.success) throw new Error('Review result schema invalid');
     return parsed.data;
   } finally { await session.close(); }
+}
+
+/** New runs keep the Agent's natural-language review opaque. */
+export function runOpaqueReview(options: Omit<TaskOptions, 'task' | 'prompt'>, seed: unknown): Promise<TaskAgentResult> {
+  return runNaturalLanguageTask({ ...options, task: 'review', prompt: '' }, seed);
 }

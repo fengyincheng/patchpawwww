@@ -25,6 +25,15 @@ import type { CommandSnapshot } from '../control-plane/snapshots.ts';
 import type { ResolvedModelSelection } from '../models/types.ts';
 import { resolveOutputBudget, type OutputBudget } from '../models/output-budget.ts';
 import { workspaceCommandEnvironment } from '../platform/command-environment.ts';
+import {
+  convergenceInstruction,
+  evaluateAgentTurnCompletion,
+  finalAnswerInstruction,
+  finalAnswerTools,
+  type AgentTurnFacts,
+  type AgentTurnPhase,
+  type FinalAnswerCapability,
+} from './agent-turn-lifecycle.ts';
 
 export interface RuntimeExecution {
   snapshot: CommandSnapshot;
@@ -33,7 +42,7 @@ export interface RuntimeExecution {
 }
 
 const DEFERRED_PROMPT_ROLES = new Set([
-  'conversation-retry', 'review-json-retry', 'repair-feedback', 'repair-no-verification',
+  'conversation-retry', 'repair-feedback', 'repair-no-verification',
   'repair-verification-empty', 'repair-closeout', 'runtime-budget', 'stop-closeout',
 ]);
 
@@ -51,8 +60,8 @@ export function runtimeExecutionFromSnapshot(snapshot: CommandSnapshot, runtimeH
   } };
 }
 
-function snapshotInstructions(execution: RuntimeExecution, values: Record<string, TemplateValue> = {}) {
-  return execution.snapshot.composition.parts.map(part => {
+function snapshotInstructions(execution: RuntimeExecution, values: Record<string, TemplateValue> = {}, phase: PermissionPhase = 'normal') {
+  return execution.snapshot.composition.parts.filter(part => !(phase === 'approved_write' && part.role === 'plan-mode')).map(part => {
     const label = part.kind === 'prompt' ? `Prompt ${part.role ?? part.slug}` : `Skill ${part.slug}`;
     let content = part.content;
     if (part.kind === 'prompt') {
@@ -110,8 +119,16 @@ export interface TaskOptions {
   preventGitPush?: boolean;
   currentBase?: CurrentBaseSnapshot;
   execution?: RuntimeExecution;
+  permissionPhase?: PermissionPhase;
+  /** Only used after an explicit /approval; this is the complete extra runtime input. */
+  approvalMessage?: string;
   templateValues?: Record<string, TemplateValue>;
   tools?: ToolsInput; stopWhen?: () => boolean;
+  /** Runtime-owned capability needed to complete a final reply. */
+  finalAnswerCapability?: FinalAnswerCapability;
+  /** New runs use opaque natural-language outcomes; false/absent is legacy compatibility only. */
+  opaqueOutcome?: boolean;
+  /** Legacy fields are retained while old persisted runs are being read. New runs do not use them. */
   /** Pending Conflict discussion may submit a new proposal revision, but stays read-only. */
   conflictDiscussion?: { proposalId: string; revision: number; hash: string };
   repairStartHead?: string;
@@ -120,6 +137,12 @@ export interface TaskOptions {
   onCloseout?: () => Promise<void>;
 }
 export interface CurrentBaseSnapshot { ref: string; sha: string; }
+export type PermissionPhase = 'normal' | 'planning' | 'approved_write';
+
+/** The one shared result contract for ordinary natural-language Agent execution. */
+export type TaskAgentResult =
+  | { outcome: 'finished'; body: string; trace?: unknown }
+  | { outcome: 'unfinished'; status: 'needs_human' | 'budget_exhausted'; reason: string; trace?: unknown };
 
 export function isGitPushCommand(command: string) {
   return /(?:^|[;&|()\n])\s*(?:env\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)?git(?:\s+\S+){0,8}\s+push(?:\s|$)/i.test(command);
@@ -132,6 +155,8 @@ export interface TaskTurnResult {
   runId?: string;
   maxOutputTokens: number;
   evidencePath: string;
+  stepCount: number;
+  maxSteps: number;
 }
 
 export class ModelOutputTruncated extends Error {
@@ -147,6 +172,22 @@ export class ModelOutputTruncated extends Error {
   }) {
     super(`Model output truncated at ${details.maxOutputTokens} tokens before a complete ${details.task} result was produced`);
     this.name = 'ModelOutputTruncated';
+  }
+}
+
+export class AgentFinalResponseMissing extends Error {
+  readonly code = 'agent_final_response_missing';
+  constructor(readonly details: {
+    task: string;
+    phase: 'execution' | 'final_answer';
+    finishReason?: string;
+    maxOutputTokens: number;
+    evidencePath: string;
+    stepCount: number;
+    maxSteps: number;
+  }) {
+    super(`Agent ${details.task} ended without a final natural-language response during ${details.phase}`);
+    this.name = 'AgentFinalResponseMissing';
   }
 }
 
@@ -205,9 +246,11 @@ function taskTools(options: TaskOptions, readOnly: boolean) {
 
 export function createTaskSession(options: TaskOptions) {
   const { task, ws, trace } = options;
+  const permissionPhase = options.permissionPhase ?? 'normal';
   const snapshotReadOnly = options.execution?.snapshot.command?.permission === 'read_only'
     || options.execution?.snapshot.conversation_profile?.permission === 'read_only'
-    || ['review', 'conversation'].includes(task);
+    || permissionPhase === 'planning'
+    || ['conversation'].includes(task);
   const readOnly = snapshotReadOnly || (options.readOnly ?? false);
   const help = createHumanHelp(trace, task);
   const sessionId = `${task}-${randomUUID().slice(0, 8)}`;
@@ -226,7 +269,9 @@ export function createTaskSession(options: TaskOptions) {
   let stopping = false;
   let toolIndex = 0;
   const starts = new Map<string, { index: number; time: number }[]>();
-  const staticInstructions = options.execution ? snapshotInstructions(options.execution, options.templateValues) : `${options.prompt}\n${humanHelpSkill}\n${loadOperation('shared')}`;
+  const staticInstructions = options.execution
+    ? `${snapshotInstructions(options.execution, options.templateValues, permissionPhase)}${options.approvalMessage ? `\n\n${options.approvalMessage}` : ''}`
+    : `${options.prompt}\n${humanHelpSkill}\n${loadOperation('shared')}`;
   const agent = createCodingAgent({ id: task, name: `PatchPaw ${task}`, model: model.model, workspace, memory,
     errorProcessors: [], // Retry policy is centralized at the current provider call, with no hidden second retry stack.
     instructions: `${staticInstructions}\nNative tool output is capped at ${contextPolicy.toolOutputTokens} tokens. Use offset/limit or focused search when truncated; suggested read size ${contextPolicy.suggestedReadLines} lines.`,
@@ -249,9 +294,9 @@ export function createTaskSession(options: TaskOptions) {
       beforeToolCall: ({ toolName, input }) => {
         if (!stopping && options.stopSignal?.aborted) throw new TaskStopped();
         if (options.preventGitPush && toolName === WORKSPACE_TOOLS.SANDBOX.EXECUTE_COMMAND
-            && typeof input === 'object' && input !== null && 'command' in input && typeof input.command === 'string'
-            && isGitPushCommand(input.command)) {
-          throw new Error('Custom read/write Agent cannot push; the Harness owns GitLab writeback.');
+            && typeof input === 'object' && input !== null && 'command' in input
+            && typeof input.command === 'string' && isGitPushCommand(input.command)) {
+          throw new Error('Agent cannot push; the Harness owns writeback.');
         }
         const key = toolName + JSON.stringify(input);
         const list = starts.get(key) ?? [];
@@ -284,75 +329,183 @@ export function createTaskSession(options: TaskOptions) {
   const signal = AbortSignal.timeout(budget.taskMs);
   const interrupt = () => { void workspace.sandbox?.stop?.().catch(() => {}); };
   options.stopSignal?.addEventListener('abort', interrupt, { once: true });
+  let stopSession: () => Promise<never>;
+
+  const generateTurn = async (prompt: string, phase: AgentTurnPhase, index: number) => {
+    const maxSteps = phase === 'execution' ? budget.maxSteps
+      : phase === 'final_answer' ? budget.finalAnswerSteps : budget.closeoutSteps;
+    const activeTools = phase === 'stop' ? ['submit_stop_report']
+      : phase === 'closeout' ? ['request_human_help', 'submit_task_closeout', ...(options.repairBudget ? ['request_repair_verification'] : [])]
+        : phase === 'final_answer' ? [...finalAnswerTools(options.finalAnswerCapability)] : undefined;
+    const abortSignal = phase === 'execution'
+      ? AbortSignal.any([signal, ...(options.stopSignal ? [options.stopSignal] : [])])
+      : phase === 'final_answer'
+        ? AbortSignal.any([AbortSignal.timeout(budget.finalAnswerMs), ...(options.stopSignal ? [options.stopSignal] : [])])
+        : phase === 'closeout' ? AbortSignal.timeout(budget.closeoutMs) : AbortSignal.timeout(budget.closeoutMs);
+    trace.emit('task_turn_start', { task, turn: index, prompt, thread: state.thread, phase, closeout: phase === 'closeout' || phase === 'stop' });
+    const result = await mastra.getAgent(task).generate(prompt, { memory: state, maxSteps,
+      abortSignal,
+      activeTools,
+      prepareStep: ({ stepNumber, systemMessages, tools }) => {
+        if (phase !== 'execution') {
+          const allowed = new Set(activeTools ?? []);
+          return { activeTools, tools: Object.fromEntries(Object.entries(tools ?? {}).filter(([name]) => allowed.has(name))) };
+        }
+        const normalTools = Object.fromEntries(Object.entries(tools ?? {}).filter(([name]) => name !== 'submit_stop_report'));
+        const remaining = maxSteps - stepNumber;
+        if (remaining !== Math.min(10, maxSteps) && remaining !== 3) return { tools: normalTools };
+        const critical = remaining <= 3;
+        const customGuidance = renderRuntimePrompt(options, 'runtime-budget', {
+          remaining, guidance: critical
+            ? '执行预算即将耗尽。停止开始新的大范围调查或工具循环，开始根据现有证据收敛最终答复。'
+            : '执行预算正在接近上限。开始收敛最终答复，不要开始新的大范围调查或工具循环。'
+        }, true);
+        const guidance = convergenceInstruction(customGuidance, remaining, critical);
+        trace.emit(critical ? 'budget_critical' : 'budget_warning', { task, turn: index, remaining,
+          guidance_injected: Boolean(guidance), guidance_source: customGuidance?.trim() ? 'snapshot' : 'code_owned' });
+        return { tools: normalTools, systemMessages: [...systemMessages, { role: 'system', content: guidance }] };
+      },
+      stopWhen: () => stopping ? !!stopReport : !!options.stopSignal?.aborted || help.requested() || !!options.stopWhen?.(),
+      modelSettings: { maxRetries: 0, temperature: 0.2, maxOutputTokens: outputBudget.effective },
+      onStepFinish: step => { trace.emit('model_step', { task, turn: index, phase, finish_reason: step.finishReason, usage: step.usage }); },
+    }).catch(async error => {
+      if (phase !== 'stop' && options.stopSignal?.aborted) return await stopSession();
+      if (phase === 'execution' && signal.aborted) throw new ExecutionBudgetExhausted({ task, phase, reason: 'execution_deadline' });
+      if (phase === 'final_answer' && abortSignal.aborted) throw new ExecutionBudgetExhausted({ task, phase, reason: 'final_answer_deadline' });
+      if (error instanceof ProviderUnavailable) throw error;
+      if (model.isUnavailable()) throw new ProviderUnavailable(); throw error;
+    });
+    if (phase !== 'stop' && options.stopSignal?.aborted) return await stopSession();
+    if (phase === 'execution' && signal.aborted && !result.text.trim()) {
+      throw new ExecutionBudgetExhausted({ task, phase, reason: 'execution_deadline' });
+    }
+    if (phase === 'final_answer' && abortSignal.aborted && !result.text.trim()) {
+      throw new ExecutionBudgetExhausted({ task, phase, reason: 'final_answer_deadline' });
+    }
+    // Turn metadata only: the conversation history itself is durable in PR Memory, and the
+    // per-turn message/step blobs used to duplicate it at tens of megabytes per long run.
+    const evidencePath = phase === 'execution' ? `${sessionId}-turn-${index}.json` : `${sessionId}-turn-${index}-${phase}.json`;
+    trace.save(evidencePath, { text: result.text,
+      usage: result.totalUsage, finishReason: result.finishReason, runId: result.runId, maxOutputTokens: outputBudget.effective });
+    trace.emit('task_turn_end', { task, turn: index, phase, text: result.text, finish_reason: result.finishReason });
+    if (phase !== 'stop' && help.requested()) throw new HumanHelpRequested(help.reason());
+    if (model.isUnavailable()) throw new ProviderUnavailable();
+    if (result.error) throw new Error('Agent runtime error');
+    return {
+      result: { text: result.text, finishReason: result.finishReason, usage: result.totalUsage, runId: result.runId,
+        maxOutputTokens: outputBudget.effective, evidencePath, stepCount: result.steps.length, maxSteps },
+      facts: {
+        text: result.text, finishReason: result.finishReason, stepCount: result.steps.length, maxSteps,
+        deadlineExpired: phase === 'execution' ? signal.aborted : abortSignal.aborted,
+        lastStepHadToolCall: (result.steps.at(-1)?.toolCalls.length ?? 0) > 0,
+      } satisfies AgentTurnFacts,
+    };
+  };
+
+  const truncation = (generated: Awaited<ReturnType<typeof generateTurn>>) => {
+    if (generated.result.finishReason !== 'length') return;
+    throw new ModelOutputTruncated({
+      task, finishReason: generated.result.finishReason, maxOutputTokens: generated.result.maxOutputTokens,
+      usage: generated.result.usage, evidencePath: generated.result.evidencePath,
+      provider: options.execution?.modelSelection.provider.type,
+      model: options.execution?.modelSelection.model.identifier,
+    });
+  };
+
+  const finalAnswer = async (source: 'execution_deadline' | 'execution_step_budget') => {
+    const index = ++turn;
+    trace.emit('agent_final_answer_started', { task, turn: index, source, final_answer_steps: budget.finalAnswerSteps });
+    try {
+      const generated = await generateTurn(finalAnswerInstruction(task, options.finalAnswerCapability), 'final_answer', index);
+      truncation(generated);
+      if (options.stopWhen?.()) {
+        trace.emit('agent_final_answer_completed', { task, turn: index, source, via: 'reserved_tool' });
+        return generated.result;
+      }
+      const completion = evaluateAgentTurnCompletion(generated.facts);
+      switch (completion.kind) {
+        case 'completed':
+          trace.emit('agent_final_answer_completed', { task, turn: index, source, via: 'text' });
+          return generated.result;
+        case 'final_answer_required':
+          throw new ExecutionBudgetExhausted({ task, phase: 'final_answer', reason: completion.reason === 'deadline' ? 'final_answer_deadline' : 'final_answer_step_budget' });
+        case 'protocol_failure':
+          throw new AgentFinalResponseMissing({ task, phase: 'final_answer', finishReason: generated.result.finishReason,
+            maxOutputTokens: generated.result.maxOutputTokens, evidencePath: generated.result.evidencePath,
+            stepCount: generated.facts.stepCount, maxSteps: generated.facts.maxSteps });
+      }
+    } catch (error) {
+      if (error instanceof ExecutionBudgetExhausted) trace.emit('agent_final_answer_exhausted', { task, turn: index, source, reason: error.details.reason });
+      throw error;
+    }
+  };
+
+  const finishTurn = async (generated: Awaited<ReturnType<typeof generateTurn>>, source?: 'execution_deadline' | 'execution_step_budget') => {
+    truncation(generated);
+    if (options.stopWhen?.()) return generated.result;
+    const completion = evaluateAgentTurnCompletion(generated.facts);
+    switch (completion.kind) {
+      case 'completed': return generated.result;
+      case 'final_answer_required': return finalAnswer(source ?? (completion.reason === 'deadline' ? 'execution_deadline' : 'execution_step_budget'));
+      case 'protocol_failure':
+        throw new AgentFinalResponseMissing({ task, phase: 'execution', finishReason: generated.result.finishReason,
+          maxOutputTokens: generated.result.maxOutputTokens, evidencePath: generated.result.evidencePath,
+          stepCount: generated.facts.stepCount, maxSteps: generated.facts.maxSteps });
+    }
+  };
+
+  stopSession = async () => {
+    if (stopping) throw new TaskStopped(stopReport ?? new TaskStopped().message);
+    stopping = true;
+    await workspace.sandbox?.stop?.();
+    await memory.settled();
+    trace.emit('human_stop_closeout_started', { task, thread: state.thread });
+    try {
+      const closeout = renderRuntimePrompt(options, 'stop-closeout', { humanMessage: JSON.stringify(options.stopRequest?.() ?? null) }, true);
+      if (closeout) await generateTurn(closeout, 'stop', ++turn);
+    }
+    catch (error) {
+      trace.emit('human_stop_closeout_failed', { message: error instanceof Error ? error.message : String(error) });
+    }
+    const summary = stopReport ?? new TaskStopped().message;
+    trace.save('stop-report.json', { status: 'stopped', source: stopReport ? 'agent' : 'harness', summary, thread: state.thread });
+    throw new TaskStopped(summary);
+  };
+
   return {
     thread: state.thread,
     async freeze() { await workspace.sandbox?.stop?.(); },
     async turnResult(prompt: string, closeout: boolean | 'stop' = false): Promise<TaskTurnResult> {
+      if (closeout) {
+        const generated = await generateTurn(prompt, closeout === 'stop' ? 'stop' : 'closeout', ++turn);
+        truncation(generated);
+        return generated.result;
+      }
       const index = ++turn;
-      const maxSteps = closeout ? budget.closeoutSteps : budget.maxSteps;
-      const activeTools = closeout === 'stop' ? ['submit_stop_report'] : closeout ? ['request_repair_verification', 'request_human_help', 'submit_task_closeout'] : undefined;
-      trace.emit('task_turn_start', { task, turn: index, prompt, thread: state.thread, closeout });
-      const result = await mastra.getAgent(task).generate(prompt, { memory: state, maxSteps,
-        abortSignal: closeout === 'stop' ? AbortSignal.timeout(budget.closeoutMs) : AbortSignal.any([closeout ? AbortSignal.timeout(budget.closeoutMs) : signal, ...(options.stopSignal ? [options.stopSignal] : [])]),
-        activeTools,
-        prepareStep: ({ stepNumber, systemMessages, tools }) => {
-          if (closeout) return { activeTools, tools: Object.fromEntries(Object.entries(tools ?? {}).filter(([name]) => activeTools!.includes(name))) };
-          const normalTools = Object.fromEntries(Object.entries(tools ?? {}).filter(([name]) => name !== 'submit_stop_report'));
-          if (!options.repairBudget) return { tools: normalTools };
-          const remaining = maxSteps - stepNumber;
-          if (remaining !== Math.min(10, maxSteps) && remaining !== 3) return { tools: normalTools };
-          const critical = remaining <= 3;
-          trace.emit(critical ? 'budget_critical' : 'budget_warning', { task, turn: index, remaining });
-          const guidance = renderRuntimePrompt(options, 'runtime-budget', {
-            remaining, guidance: critical ? 'Very little execution budget remains. Do not begin another broad repair loop.' : 'Approaching execution budget. Begin converging.'
-          }, true);
-          return guidance ? { tools: normalTools, systemMessages: [...systemMessages, { role: 'system', content: guidance }] } : { tools: normalTools };
-        },
-        stopWhen: () => stopping ? !!stopReport : !!options.stopSignal?.aborted || help.requested() || !!options.stopWhen?.(),
-        modelSettings: { maxRetries: 0, temperature: 0.2, maxOutputTokens: outputBudget.effective },
-        onStepFinish: step => { trace.emit('model_step', { task, finish_reason: step.finishReason, usage: step.usage }); },
-      }).catch(async error => {
-        if (closeout !== 'stop' && options.stopSignal?.aborted) return await this.stop();
-        if (!closeout && signal.aborted) throw new ExecutionBudgetExhausted();
-        if (error instanceof ProviderUnavailable) throw error;
-        if (model.isUnavailable()) throw new ProviderUnavailable(); throw error;
-      });
-      if (closeout !== 'stop' && options.stopSignal?.aborted) return await this.stop();
-      // Turn metadata only: the conversation history itself is durable in PR Memory, and the
-      // per-turn message/step blobs used to duplicate it at tens of megabytes per long run.
-      const evidencePath = `${sessionId}-turn-${index}.json`;
-      trace.save(evidencePath, { text: result.text,
-        usage: result.totalUsage, finishReason: result.finishReason, runId: result.runId, maxOutputTokens: outputBudget.effective });
-      trace.emit('task_turn_end', { task, turn: index, text: result.text, finish_reason: result.finishReason });
-      if (closeout !== 'stop' && help.requested()) throw new HumanHelpRequested(help.reason());
-      if (model.isUnavailable()) throw new ProviderUnavailable();
-      if (result.error) throw new Error('Agent runtime error');
-      return { text: result.text, finishReason: result.finishReason, usage: result.totalUsage, runId: result.runId,
-        maxOutputTokens: outputBudget.effective, evidencePath };
+      try {
+        return await finishTurn(await generateTurn(prompt, 'execution', index));
+      } catch (error) {
+        if (error instanceof ExecutionBudgetExhausted && error.details.phase === 'execution') return await finalAnswer(error.details.reason);
+        throw error;
+      }
     },
     async turn(prompt: string, closeout: boolean | 'stop' = false): Promise<string> {
       return (await this.turnResult(prompt, closeout)).text;
     },
-    async stop(): Promise<never> {
-      if (stopping) throw new TaskStopped(stopReport ?? new TaskStopped().message);
-      stopping = true;
-      await workspace.sandbox?.stop?.();
-      await memory.settled();
-      trace.emit('human_stop_closeout_started', { task, thread: state.thread });
-      try {
-        const closeout = renderRuntimePrompt(options, 'stop-closeout', { humanMessage: JSON.stringify(options.stopRequest?.() ?? null) }, true);
-        if (closeout) await this.turn(closeout, 'stop');
-      }
-      catch (error) { trace.emit('human_stop_closeout_failed', { message: (error as Error).message }); }
-      const summary = stopReport ?? new TaskStopped().message;
-      trace.save('stop-report.json', { status: 'stopped', source: stopReport ? 'agent' : 'harness', summary, thread: state.thread });
-      throw new TaskStopped(summary);
-    },
+    async stop(): Promise<never> { return await stopSession(); },
     async close() { options.stopSignal?.removeEventListener('abort', interrupt); try { await memory.settled(); } finally { try { await workspace.destroy(); } finally { await storage.close(); } } },
   };
 }
 
-export class ExecutionBudgetExhausted extends Error {}
+export class ExecutionBudgetExhausted extends Error {
+  readonly code = 'execution_budget_exhausted';
+  constructor(readonly details:
+    | { task: string; phase: 'execution'; reason: 'execution_deadline' | 'execution_step_budget' }
+    | { task: string; phase: 'final_answer'; reason: 'final_answer_deadline' | 'final_answer_step_budget' }) {
+    super(`Agent ${details.task} exhausted the ${details.phase} budget before a final response`);
+    this.name = 'ExecutionBudgetExhausted';
+  }
+}
 
 export function parseResult<T>(text: string, schema: z.ZodType<T>) {
   const clean = text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');

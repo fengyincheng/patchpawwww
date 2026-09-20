@@ -1,4 +1,4 @@
-import { ModelOutputTruncated } from '../harness/runtime.ts';
+import { AgentFinalResponseMissing, ExecutionBudgetExhausted, ModelOutputTruncated } from '../harness/runtime.ts';
 import { ProviderResponseError, ProviderUnavailable, providerError, type ProviderFailureCode } from '../harness/retry.ts';
 import { ModelAdapterError } from '../models/types.ts';
 import { ControlPlaneError } from '../control-plane/errors.ts';
@@ -43,6 +43,14 @@ function providerFailure(code: ProviderFailureCode | 'provider_unavailable', det
 }
 
 export function classifyRunFailure(error: unknown): RunFailure {
+  if (error instanceof ExecutionBudgetExhausted) {
+    return { code: 'budget_exhausted', category: 'model', retryable: true, user_action: 'retry',
+      message: 'Agent 执行预算已耗尽，尚未生成可交付的最终答复。' };
+  }
+  if (error instanceof AgentFinalResponseMissing) {
+    return { code: 'agent_final_response_missing', category: 'model', retryable: false, user_action: 'inspect_logs',
+      message: 'Agent 未生成可交付的最终自然语言答复。' };
+  }
   if (error instanceof ModelOutputTruncated) {
     return { code: 'model_output_truncated', category: 'model', retryable: true, user_action: 'retry',
       message: '模型输出达到上限，未生成完整结果。' };
@@ -117,6 +125,7 @@ export function classifyRunFailure(error: unknown): RunFailure {
 
 export function terminalStatusForFailure(failure: RunFailure) {
   if (failure.code === 'model_output_truncated') return 'model_output_truncated' as const;
+  if (failure.code === 'budget_exhausted') return 'budget_exhausted' as const;
   if (failure.category === 'provider') return 'provider_unavailable' as const;
   return 'harness_failed' as const;
 }

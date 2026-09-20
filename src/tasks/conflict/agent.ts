@@ -1,5 +1,6 @@
 import { createTool } from '@mastra/core/tools';
-import { ExecutionBudgetExhausted, createTaskSession, templateValuesFromSeed, type TaskOptions } from '../../harness/runtime.ts';
+import { ExecutionBudgetExhausted, createTaskSession, templateValuesFromSeed, type TaskAgentResult, type TaskOptions } from '../../harness/runtime.ts';
+import { runNaturalLanguageTask } from '../agent-outcome.ts';
 import { z } from 'zod';
 import { conflictProposalDraftSchema, type ConflictProposalDraft } from '../../runner/conflict-proposals.ts';
 import { HumanHelpRequested } from '../human-help.ts';
@@ -11,12 +12,33 @@ export type ConflictAnalysisResult =
 
 const READ_ONLY_CONFLICT_TOOLS = new Set(['read_pr_comments', 'read_ci_evidence', 'git_diff']);
 
+export type OpaqueConflictAnalysisResult =
+  | { status: 'completed'; body: string }
+  | { status: 'needs_human' | 'budget_exhausted'; summary: string };
+
+async function runOpaqueConflict(options: Omit<TaskOptions, 'task' | 'prompt'>, seed: unknown): Promise<OpaqueConflictAnalysisResult> {
+  const permissionPhase = options.permissionPhase ?? 'normal';
+  // Permission, not the task name, decides whether the Agent may write. Planning,
+  // read-only and legacy bare calls stay fail-closed to the inspection allowlist.
+  const writeEnabled = permissionPhase === 'approved_write' || options.execution?.snapshot.command?.permission === 'read_write';
+  const result: TaskAgentResult = await runNaturalLanguageTask({
+    ...options, task: 'conflict', prompt: '', permissionPhase,
+    tools: writeEnabled || !options.tools ? options.tools
+      : Object.fromEntries(Object.entries(options.tools).filter(([name]) => READ_ONLY_CONFLICT_TOOLS.has(name))),
+  }, seed);
+  return result.outcome === 'finished' ? { status: 'completed', body: result.body } : { status: result.status, summary: result.reason };
+}
+
 /**
  * Conflict analysis is deliberately a separate read-only task. It may inspect a mechanically
  * prepared merge/index, but the only task-specific write it can perform is submitting a
  * structured proposal to the Harness; it never edits, stages, commits or pushes.
  */
-export async function runConflict(options: Omit<TaskOptions, 'task' | 'prompt'>, seed: unknown): Promise<ConflictAnalysisResult> {
+export function runConflict(options: Omit<TaskOptions, 'task' | 'prompt'> & { opaqueOutcome: true }, seed: unknown): Promise<OpaqueConflictAnalysisResult>;
+export function runConflict(options: Omit<TaskOptions, 'task' | 'prompt'> & { opaqueOutcome?: false | undefined }, seed: unknown): Promise<ConflictAnalysisResult>;
+export function runConflict(options: Omit<TaskOptions, 'task' | 'prompt'>, seed: unknown): Promise<ConflictAnalysisResult>;
+export async function runConflict(options: Omit<TaskOptions, 'task' | 'prompt'>, seed: unknown): Promise<ConflictAnalysisResult | OpaqueConflictAnalysisResult> {
+  if (options.opaqueOutcome) return await runOpaqueConflict(options, seed);
   let draft: ConflictProposalDraft | undefined;
   const session = createTaskSession({ ...options, task: 'conflict', prompt: '', readOnly: true,
     templateValues: templateValuesFromSeed(seed),

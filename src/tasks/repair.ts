@@ -1,5 +1,5 @@
 import { TaskStopped } from '../runner/stop.ts';
-import { createTaskSession, ExecutionBudgetExhausted, renderRuntimePrompt, templateValuesFromSeed, type TaskOptions } from '../harness/runtime.ts';
+import { createTaskSession, ExecutionBudgetExhausted, renderRuntimePrompt, templateValuesFromSeed, type TaskAgentResult, type TaskOptions } from '../harness/runtime.ts';
 import { createCloseoutSubmission, persistCloseout } from './closeout.ts';
 import { createRepairSubmission } from './repair-submission.ts';
 import { validateWorkspace } from '../workspace/manager.ts';
@@ -7,6 +7,7 @@ import { budget } from '../harness/budget.ts';
 import { captureVerificationInputs } from '../workspace/verification-inputs.ts';
 import { git } from '../workspace/git.ts';
 import { HumanHelpRequested } from './human-help.ts';
+import { runNaturalLanguageTask } from './agent-outcome.ts';
 
 // The trace keeps decision facts and a pointer; the full stdout/stderr evidence lives in the
 // validation artifacts (last-validation.json / <task>-validation-*.json), never duplicated
@@ -19,7 +20,12 @@ function verificationEvent(task: string, extra: { attempt?: number; closeout?: b
     evidence: 'last-validation.json' };
 }
 
-export async function runRepair(options: TaskOptions, seed: unknown) {
+export type LegacyRepairResult =
+  | { status: 'repaired'; summary: string; tests: string[]; validation_not_applicable?: string | null; warnings?: string[] }
+  | { status: 'needs_human' | 'budget_exhausted'; summary: string; closeout?: string };
+
+/** Legacy structured repair result retained solely for old records and compatibility callers. */
+async function runLegacyRepair(options: TaskOptions, seed: unknown): Promise<LegacyRepairResult> {
   const startHead = options.repairStartHead ?? (options.task === 'conflict' ? options.ws.initialHead : (await git(options.ws.path, ['rev-parse', 'HEAD'], options.trace)).stdout.trim());
   options.trace.emit('repair_started', { task: options.task, head: startHead });
   options.ws.verificationInputs ??= await captureVerificationInputs(options.ws.path, options.trace);
@@ -32,7 +38,7 @@ export async function runRepair(options: TaskOptions, seed: unknown) {
   let lastIssue = '尚未提交验收请求。';
   try {
     for (let attempt = 0; attempt <= budget.feedbackTurns; attempt++) {
-      try { await session.turn(input); } // Narrative is preserved in trace, never parsed as the result.
+      try { await session.turn(input); }
       catch (error) { if (!(error instanceof ExecutionBudgetExhausted)) throw error; break; }
       if (closeout.get()) break;
       const decision = submission.take();
@@ -86,4 +92,28 @@ export async function runRepair(options: TaskOptions, seed: unknown) {
     if (error instanceof HumanHelpRequested) return { status: 'needs_human' as const, summary: error.message };
     throw error;
   } finally { await session.close(); }
+}
+
+export type OpaqueRepairResult =
+  | { status: 'repaired'; body: string }
+  | { status: 'needs_human' | 'budget_exhausted'; summary: string };
+
+/** New runs use the shared opaque natural-language outcome contract. */
+export async function runOpaqueRepair(options: TaskOptions, seed: unknown): Promise<OpaqueRepairResult> {
+  const result = await runNaturalLanguageTask(options, seed);
+  if (result.outcome === 'finished') return { status: 'repaired', body: result.body };
+  return { status: result.status, summary: result.reason };
+}
+
+export function runRepair(options: TaskOptions & { opaqueOutcome: true }, seed: unknown): Promise<OpaqueRepairResult>;
+export function runRepair(options: TaskOptions & { opaqueOutcome?: false | undefined }, seed: unknown): Promise<LegacyRepairResult>;
+export function runRepair(options: TaskOptions, seed: unknown): Promise<LegacyRepairResult>;
+export function runRepair(options: TaskOptions, seed: unknown): Promise<OpaqueRepairResult | LegacyRepairResult> {
+  return options.opaqueOutcome ? runOpaqueRepair(options, seed) : runLegacyRepair(options, seed);
+}
+
+export function taskAgentResultFromRepair(result: OpaqueRepairResult): TaskAgentResult {
+  return result.status === 'repaired'
+    ? { outcome: 'finished', body: result.body }
+    : { outcome: 'unfinished', status: result.status, reason: result.summary, trace: result };
 }
