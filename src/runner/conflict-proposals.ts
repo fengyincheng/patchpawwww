@@ -11,6 +11,7 @@ import { cancelOutboundDelivery, listOutbound, finalizeDelivery } from './outbou
 import { Trace } from '../harness/trace.ts';
 import { patchpawPaths } from '../config/paths.ts';
 import { atomicJson, immutableJson, readJson } from './durable-json.ts';
+import { applyRunPhase } from './phases.ts';
 
 export const CONFLICT_PROPOSAL_SCHEMA_VERSION = 'patchpaw.conflict-proposal.v1';
 export const CONFLICT_PROPOSAL_CURRENT_SCHEMA_VERSION = 'patchpaw.conflict-proposal-current.v1';
@@ -358,8 +359,8 @@ export async function saveProposalState(path: string, proposal: ConflictProposal
   const current = await readState(path);
   if (current && current.conflict_proposal && current.conflict_proposal.proposal_revision > proposal.proposal_revision) return current;
   const pointer = proposalPointerForState(proposal, workspacePath);
-  const next: RunState = { ...(current ?? {} as RunState), ...patch, conflict_proposal: pointer,
-    phase: patch.phase ?? current?.phase ?? proposal.status, active: patch.active ?? current?.active ?? false };
+  const next: RunState = applyRunPhase({ ...(current ?? {} as RunState), ...patch, conflict_proposal: pointer,
+    active: patch.active ?? current?.active ?? false }, patch.phase ?? current?.phase ?? proposal.status);
   await writeState(path, next);
   return next;
 }
@@ -377,7 +378,7 @@ export async function markCurrentConflictProposalStale(path: string, workspacePa
   await markConflictProposalStatus(path, current.proposal.proposal_revision, 'stale', workspacePath);
   const state = await readState(path);
   if (state?.conflict_proposal?.proposal_hash === current.proposal.proposal_hash) {
-    await writeState(path, { ...state, phase: 'stale', active: false, conflict_proposal: { ...state.conflict_proposal, status: 'stale' } });
+    await writeState(path, applyRunPhase({ ...state, active: false, conflict_proposal: { ...state.conflict_proposal, status: 'stale' } }, 'stale'));
   }
   return { ...current, reason };
 }
@@ -424,9 +425,9 @@ export async function reconcileConflictProposalPublication(root: string, statePa
   if (updated && state && state.phase !== 'closed'
       && (state.conflict_proposal?.proposal_hash !== current.proposal.proposal_hash
         || state.conflict_proposal?.status !== 'published' || state.phase !== 'awaiting_approval')) {
-    const next: RunState = { ...state, active: false, waiting_for_ci: false, phase: 'awaiting_approval',
+    const next: RunState = applyRunPhase({ ...state, active: false,
       conflict_proposal: { ...proposalPointerForState(updated.proposal, current.pointer.workspace_path), status: 'published', publication_delivery_id: publication.delivery_id,
-        publication_remote_id: publication.remote_id, publication_remote_url: publication.remote_url, published_at: publication.published_at } };
+        publication_remote_id: publication.remote_id, publication_remote_url: publication.remote_url, published_at: publication.published_at } }, 'awaiting_approval');
     await writeState(statePath, next);
     const paused = await readPaused(statePath);
     if (paused?.workspace.path === current.pointer.workspace_path) await savePaused(statePath, { ...paused, status: 'awaiting_approval' });

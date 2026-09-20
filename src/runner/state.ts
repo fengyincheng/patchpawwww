@@ -4,10 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { tryAcquireFileLock } from '../platform/lock.ts';
 import { isProcessAlive } from '../platform/process.ts';
 import { safeStorageDirectory } from '../scm/identity.ts';
+import { isRunPhase, parseRunPhase, type RunPhase } from './phases.ts';
 
 export interface RunState {
   repo: string; pr_number: number; run_id: string; current_head_sha: string;
-  phase: string; repair_attempts: number; last_patchpaw_commit: string | null; waiting_for_ci: boolean;
+  phase: RunPhase; repair_attempts: number; last_patchpaw_commit: string | null; waiting_for_ci: boolean;
   active: boolean; pid: number;
   handled_comment_ids?: number[];
   execution_id?: number;
@@ -35,14 +36,50 @@ export interface RunState {
     workspace_evidence_sha256: string; command_snapshot_id: string; command_snapshot_sha256: string;
     publication_delivery_id?: string; publication_remote_id?: number; publication_remote_url?: string; published_at?: string;
   };
+  // The generic approval Plan is an immutable, versioned read-only result plus
+  // a mutable lifecycle pointer. The files under the run directory remain the
+  // evidence source; this projection only locates the current revision.
+  approval_plan?: {
+    plan_id: string; plan_revision: number; body_sha256: string;
+    status: 'draft' | 'publication_pending' | 'published' | 'approved' | 'stale' | 'superseded';
+    run_id: string; execution_id: number; workspace_path: string;
+    pr_head_sha: string; pr_head_ref: string; pr_head_repo: string;
+    current_base_tip_sha: string; base_ref: string; workspace_evidence_sha256: string;
+    command_snapshot_id: string; command_snapshot_sha256: string;
+    publication_delivery_id?: string; publication_remote_id?: number; publication_remote_url?: string; published_at?: string;
+  };
 }
 export function statePath(root: string, repo: string, number: number) {
   const directory = repo.startsWith('gitlab:') ? safeStorageDirectory(repo) : repo.replace('/', '__');
   return join(root, directory, `pr-${number}.json`);
 }
 export async function readState(path: string): Promise<RunState | null> {
-  try { return JSON.parse(await readFile(path, 'utf8')); }
+  try {
+    const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+    if (!isRecord(raw)) throw new Error(`Run state at ${path} is not an object`);
+    const normalized = { ...raw, phase: parseRunPhase(raw.phase) };
+    if (!isRunState(normalized)) throw new Error(`Run state at ${path} has invalid required fields`);
+    return normalized;
+  }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isRunState(value: unknown): value is RunState {
+  if (!isRecord(value)) return false;
+  return typeof value.repo === 'string'
+    && Number.isSafeInteger(value.pr_number)
+    && typeof value.run_id === 'string'
+    && typeof value.current_head_sha === 'string'
+    && isRunPhase(value.phase)
+    && Number.isSafeInteger(value.repair_attempts)
+    && (typeof value.last_patchpaw_commit === 'string' || value.last_patchpaw_commit === null)
+    && typeof value.waiting_for_ci === 'boolean'
+    && typeof value.active === 'boolean'
+    && Number.isSafeInteger(value.pid);
 }
 export async function writeState(path: string, state: RunState) {
   await mkdir(dirname(path), { recursive: true });

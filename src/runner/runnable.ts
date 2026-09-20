@@ -4,6 +4,7 @@ import { hasHumanReplies } from './human-feedback.ts';
 import { readState, statePath } from './state.ts';
 import { patchpawPaths } from '../config/paths.ts';
 import { readUnfinishedConflictApproval } from './conflict-approval.ts';
+import { readUnfinishedApprovalPlanClaim } from './approval-plans.ts';
 
 async function json(path: string) {
   try { return JSON.parse(await readFile(path, 'utf8')); }
@@ -22,6 +23,7 @@ export async function hasRunnableWork(root: string, repo: string, number: number
   // marked handled. This lets a webhook redelivery or a later human entry wake the
   // mechanical recovery path without consuming the approval a second time.
   if (await readUnfinishedConflictApproval(path)) return true;
+  if (await readUnfinishedApprovalPlanClaim(path)) return true;
   if (state.completion_notice_status === 'pending' || state.pending_close_refusal) return true;
   const journal = await json(`${path}.close.json`);
   if (journal?.status === 'closing') return true;

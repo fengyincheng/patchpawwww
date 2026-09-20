@@ -62,6 +62,53 @@ export interface ConflictWorkspaceEvidence {
   captured_at: string;
 }
 
+export type StoredConflictWorkspaceEvidence = ConflictWorkspaceEvidence & { evidence_sha256?: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(entry => typeof entry === 'string');
+}
+
+/** Validate the persisted evidence envelope before approval logic relies on it. */
+export function parseStoredConflictWorkspaceEvidence(value: unknown): StoredConflictWorkspaceEvidence | null {
+  if (!isRecord(value) || value.schema_version !== 'patchpaw.workspace-evidence.v1') return null;
+  const prNumber = value.pr_number;
+  const filesValue = value.files;
+  if (typeof value.repository !== 'string' || typeof prNumber !== 'number' || !Number.isSafeInteger(prNumber)
+      || typeof value.pr_head_sha !== 'string' || typeof value.historical_base_sha !== 'string'
+      || typeof value.current_base_tip_sha !== 'string' || typeof value.base_ref !== 'string'
+      || typeof value.run_id !== 'string' || typeof value.execution_id !== 'string'
+      || typeof value.command_snapshot_id !== 'string' || typeof value.command_snapshot_sha256 !== 'string'
+      || typeof value.workspace_head !== 'string' || typeof value.initial_head !== 'string'
+      || typeof value.merge_base !== 'string' || typeof value.git_status_porcelain_v2 !== 'string'
+      || typeof value.git_index !== 'string' || typeof value.git_unmerged_index !== 'string'
+      || (value.merge_head !== null && typeof value.merge_head !== 'string')
+      || typeof value.merge_pending !== 'boolean' || !stringArray(value.unresolved_paths)
+      || !stringArray(value.pr_diff_paths) || !stringArray(value.current_base_affected_paths)
+      || !isRecord(filesValue) || !Object.values(filesValue).every(entry => typeof entry === 'string')
+      || typeof value.captured_at !== 'string'
+      || (value.evidence_sha256 !== undefined && typeof value.evidence_sha256 !== 'string')) return null;
+  const files: Record<string, string> = {};
+  for (const [path, digest] of Object.entries(filesValue)) {
+    if (typeof digest !== 'string') return null;
+    files[path] = digest;
+  }
+  return {
+    schema_version: 'patchpaw.workspace-evidence.v1', repository: value.repository, pr_number: prNumber,
+    pr_head_sha: value.pr_head_sha, historical_base_sha: value.historical_base_sha, current_base_tip_sha: value.current_base_tip_sha,
+    base_ref: value.base_ref, run_id: value.run_id, execution_id: value.execution_id,
+    command_snapshot_id: value.command_snapshot_id, command_snapshot_sha256: value.command_snapshot_sha256,
+    workspace_head: value.workspace_head, initial_head: value.initial_head, merge_base: value.merge_base,
+    git_status_porcelain_v2: value.git_status_porcelain_v2, git_index: value.git_index, git_unmerged_index: value.git_unmerged_index,
+    merge_head: value.merge_head, merge_pending: value.merge_pending, unresolved_paths: value.unresolved_paths,
+    pr_diff_paths: value.pr_diff_paths, current_base_affected_paths: value.current_base_affected_paths, files,
+    captured_at: value.captured_at, ...(value.evidence_sha256 ? { evidence_sha256: value.evidence_sha256 } : {}),
+  };
+}
+
 function lines(value: string) { return value.split('\0').filter(Boolean).length ? value.split('\0').filter(Boolean) : value.trim().split('\n').filter(Boolean); }
 
 export function workspaceEvidenceSha256(evidence: ConflictWorkspaceEvidence) {

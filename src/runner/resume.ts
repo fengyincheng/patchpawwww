@@ -10,7 +10,7 @@ export interface PausedWorkspace {
   status: 'budget_exhausted' | 'needs_human' | 'stopped' | 'publication_pending' | 'awaiting_approval' | 'claimed' | 'stale' | 'completed';
   remote_head?: string; pause_phase?: string;
   pause_reason?: 'budget' | 'human_decision' | 'human_stop';
-  task: 'conflict' | 'ci' | 'repair' | 'review'; run_id: string; execution_id: number; base_sha: string; base_ref: string;
+  task: 'custom' | 'conflict' | 'ci' | 'repair' | 'review'; run_id: string; execution_id: number; base_sha: string; base_ref: string;
   local_head: string; workspace: WorkspaceState; reason?: string;
 }
 export async function readPaused(path: string): Promise<PausedWorkspace | null> {
@@ -38,10 +38,13 @@ export async function savePaused(path: string, value: PausedWorkspace) {
 // `dispose` releases a rejected candidate's checkout AFTER its stale reason is durable, so a
 // stale pause never leaves a permanent workspace behind; PR memory and the candidate's run
 // evidence are untouched. Disposal failure is recorded, never fatal to the fresh preparation.
-export async function resumeWorkspace(path: string, current: { head: string; base: string; main: string; baseRef: string; ownerRunId?: string; task?: 'conflict' | 'ci' | 'repair' | 'review' }, trace: Trace,
-  dispose?: (workspace: string) => Promise<void>) {
+export async function resumeWorkspace(path: string, current: { head: string; base: string; main: string; baseRef: string; ownerRunId?: string; task?: 'custom' | 'conflict' | 'ci' | 'repair' | 'review' }, trace: Trace,
+  dispose?: (workspace: string) => Promise<void>, options: { allowApproval?: boolean } = {}) {
   const candidate = await readPaused(path);
-  if (!candidate || !['budget_exhausted', 'needs_human', 'stopped'].includes(candidate.status) || candidate.task !== (current.task ?? 'conflict')) return null;
+  const resumableStatuses = options.allowApproval
+    ? ['budget_exhausted', 'needs_human', 'stopped', 'awaiting_approval', 'claimed']
+    : ['budget_exhausted', 'needs_human', 'stopped'];
+  if (!candidate || !resumableStatuses.includes(candidate.status) || candidate.task !== (current.task ?? 'conflict')) return null;
   trace.emit('resume_candidate_found', { run_id: candidate.run_id, execution_id: candidate.execution_id });
   const reject = async (reason: string) => {
     trace.emit('resume_candidate_rejected', { run_id: candidate.run_id, reason });
