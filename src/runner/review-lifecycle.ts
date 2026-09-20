@@ -2,14 +2,16 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Octokit } from '@octokit/rest';
-import { reviewResultSchema } from '../tasks/review/result.ts';
+import { reviewPayloadSchema } from '../tasks/review/result.ts';
 import { ReviewStale } from '../scm/errors.ts';
 import { Trace } from '../harness/trace.ts';
 import { writeState, type RunState } from './state.ts';
 import { deliverImmediately, enqueueReviewDelivery, OutboundPending } from './outbound.ts';
+import { assertRunPhase, type RunPhase } from './phases.ts';
+import type { ScmAdapter } from '../scm/types.ts';
 
 const shaSchema = z.string().regex(/^[a-f0-9]{40}$/);
-export const reviewArtifactSchema = reviewResultSchema.extend({ head_sha: shaSchema });
+export const reviewArtifactSchema = z.object({ head_sha: shaSchema }).and(reviewPayloadSchema);
 const publicationSchema = z.object({
   id: z.number().int().positive(), html_url: z.url(), commit_id: shaSchema, published_at: z.string().min(1),
   run_id: z.string(), kind: z.literal('review'), recovered: z.boolean(), reused: z.boolean(),
@@ -19,7 +21,7 @@ export async function readArtifact(dir: string, name: string): Promise<any | nul
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
 
-export async function reviewCheckpoint(dir: string) {
+export async function reviewCheckpoint(dir: string): Promise<RunPhase> {
   const result = await readArtifact(dir, 'result.json');
   if (result?.status === 'review_completed') return 'review_completed';
   if (result?.status === 'review_stale') return 'review_stale';
@@ -43,10 +45,10 @@ export interface ReviewLifecycle {
   trace: Trace; state: RunState; path: string; runtimeHome: string; recovered: boolean;
   // Set when this execution resumes a workspace whose prior run already settled the review publication.
   settled_run_id?: string;
-  connection: () => Promise<{ client: Octokit; botLogin: string; mentions: string[] }>;
+  connection: () => Promise<{ adapter?: ScmAdapter; projectId?: string; botLogin: string; mentions: string[]; client?: Octokit }>;
 }
-async function checkpoint(ctx: ReviewLifecycle, phase: string) {
-  ctx.state.phase = phase; ctx.state.waiting_for_ci = false;
+async function checkpoint(ctx: ReviewLifecycle, phase: RunPhase) {
+  ctx.state.phase = phase; ctx.state.waiting_for_ci = phase === 'ci';
   await writeState(ctx.path, ctx.state);
   ctx.trace.emit('phase', { phase, recovered: ctx.recovered });
 }
@@ -55,7 +57,7 @@ export async function finalizeReview(ctx: ReviewLifecycle, result: Record<string
   // Result first: death before the state write is recoverable without any remote action.
   ctx.trace.save('result.json', result);
   ctx.state.active = false; // pid is retained only as historical worker identity.
-  await checkpoint(ctx, String(result.status));
+  await checkpoint(ctx, assertRunPhase(String(result.status)));
   return result;
 }
 
@@ -73,12 +75,15 @@ export async function ensureReviewPublished(ctx: ReviewLifecycle) {
     return { review, publication }; // Confirmed remote evidence: finalization only, zero GitHub actions.
   }
   await checkpoint(ctx, 'review_ready');
-  const { client, botLogin, mentions } = await ctx.connection();
+  const connection = await ctx.connection();
+  if (!connection.adapter && !connection.client) throw new Error('Review publication has no SCM connection');
+  const { adapter, projectId, client, botLogin, mentions } = connection;
   await checkpoint(ctx, 'review_publishing');
   const stored = await enqueueReviewDelivery({ root: ctx.runtimeHome, repo: state.repo, prNumber: state.pr_number,
     semanticKey: `review:${state.run_id}:${review.head_sha}`, headSha: review.head_sha, review, mentions, botLogin,
-    runId: state.run_id, allowLegacy: ctx.recovered, source: { run_id: state.run_id, head_sha: review.head_sha, recovered: ctx.recovered ? 1 : 0 } });
-  const attempt = await deliverImmediately(ctx.runtimeHome, stored, { client, botLogin });
+    runId: state.run_id, allowLegacy: ctx.recovered, source: { run_id: state.run_id, head_sha: review.head_sha,
+      ...(adapter && projectId ? { project_id: projectId } : {}), recovered: ctx.recovered ? 1 : 0 } });
+  const attempt = await deliverImmediately(ctx.runtimeHome, stored, { adapter, client, botLogin });
   if (attempt.item.status !== 'delivered') throw new OutboundPending(attempt.item);
   const published = attempt.item.receipt!;
   const publication = publicationSchema.parse({ ...published, run_id: state.run_id, kind: 'review', recovered: ctx.recovered });

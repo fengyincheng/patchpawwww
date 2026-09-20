@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { runtimeHomeFromCommunicationDb } from '../config/paths.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Octokit } from '@octokit/rest';
-import type { ReviewResult } from '../tasks/review/result.ts';
+import type { ReviewPayload as ReviewOutput } from '../tasks/review/result.ts';
 import { mentionUsers } from '../github/comments.ts';
 import { publishReview } from '../github/review-publisher.ts';
 import { ReviewStale } from '../scm/errors.ts';
@@ -103,7 +103,7 @@ export async function enqueueCommentDelivery(input: EnqueueCommentInput): Promis
 }
 
 export interface EnqueueReviewInput {
-  root: string; repo: string; prNumber: number; purpose?: string; semanticKey: string; headSha: string; review: ReviewResult;
+  root: string; repo: string; prNumber: number; purpose?: string; semanticKey: string; headSha: string; review: ReviewOutput;
   mentions: string[]; botLogin?: string; runId: string; allowLegacy?: boolean;
   source?: Record<string, string | number | null | undefined>;
 }

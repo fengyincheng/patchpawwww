@@ -1,4 +1,4 @@
-import type { ReviewResult } from '../tasks/review/result.ts';
+import type { ReviewPayload as ReviewOutput } from '../tasks/review/result.ts';
 import type { HumanReply } from '../github/comments.ts';
 
 export type OutboundKind = 'comment' | 'review';
@@ -25,7 +25,7 @@ export interface CommentPayload {
 
 export interface ReviewPayload {
   head_sha: string;
-  review: ReviewResult;
+  review: ReviewOutput;
   mentions: string[];
   bot_login?: string;
   run_id: string;
