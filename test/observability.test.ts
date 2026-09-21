@@ -4,7 +4,7 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/pro
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { TraceReader } from '../src/observability/trace-reader.ts';
@@ -109,19 +109,24 @@ function runState(repo: string, changeNumber: number, runId: string, active: boo
     repair_attempts: 0, last_patchpaw_commit: null, waiting_for_ci: false, active, pid: process.pid, execution_id: 1 };
 }
 
+// Live observers must see complete artifacts, just as they do with Harness publication.
+function saveObserverArtifact(path: string, value: unknown) {
+  new Trace(dirname(path)).save(basename(path), value);
+}
+
 async function createCliRun(home: string, runId: string, options: { repo?: string; changeNumber?: number; trace?: string; result?: Record<string, unknown>; active?: boolean }) {
   const repo = options.repo ?? 'owner/repo';
   const changeNumber = options.changeNumber ?? 123;
   const paths = patchpawPaths(home);
   const directory = join(paths.runs, runId);
   await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, 'manifest.json'), JSON.stringify({ run_id: runId, repo, pr_number: changeNumber,
-    started_at: '2026-09-17T00:00:00.000Z', task_chain: ['review'], execution_id: 1 }) + '\n');
+  saveObserverArtifact(join(directory, 'manifest.json'), { run_id: runId, repo, pr_number: changeNumber,
+    started_at: '2026-09-17T00:00:00.000Z', task_chain: ['review'], execution_id: 1 });
   await writeFile(join(directory, 'trace.jsonl'), options.trace ?? '');
-  if (options.result) await writeFile(join(directory, 'result.json'), JSON.stringify(options.result) + '\n');
+  if (options.result) saveObserverArtifact(join(directory, 'result.json'), options.result);
   const stateFile = statePath(paths.state, repo, changeNumber);
   await mkdir(join(stateFile, '..'), { recursive: true });
-  await writeFile(stateFile, JSON.stringify(runState(repo, changeNumber, runId, options.active ?? false)) + '\n');
+  saveObserverArtifact(stateFile, runState(repo, changeNumber, runId, options.active ?? false));
   const workspaceMarker = join(paths.workspaces, runId, 'marker.txt');
   await mkdir(join(workspaceMarker, '..'), { recursive: true });
   await writeFile(workspaceMarker, 'observer-fixture');
@@ -426,7 +431,7 @@ test('agent:open CLI follows a live run once without duplicating appended events
   await observer.waitFor('TOOL live_tool');
   await appendFile(paths.tracePath, JSON.stringify({ event: 'tool_end', time: '2026-09-17T00:00:02.000Z', tool: 'live_tool', exit_code: 0 }) + '\n');
   await observer.waitFor('TOOL RESULT live_tool');
-  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'live-cli-run' }) + '\n');
+  saveObserverArtifact(paths.resultPath, { status: 'review_completed', run_id: 'live-cli-run' });
   const finished = await observer.finish();
   assert.equal(finished.code, 0, finished.stderr);
   assert.equal((finished.stdout.match(/TOOL live_tool/g) ?? []).length, 1);
@@ -445,7 +450,7 @@ test('agent:open CLI waits for a partial JSONL line until its newline arrives', 
   assert.doesNotMatch(observer.stdout, /TOOL partial_tool/);
   await appendFile(paths.tracePath, '\n');
   await observer.waitFor('TOOL partial_tool');
-  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'partial-cli-run' }) + '\n');
+  saveObserverArtifact(paths.resultPath, { status: 'review_completed', run_id: 'partial-cli-run' });
   const finished = await observer.finish();
   assert.equal(finished.code, 0, finished.stderr);
   assert.equal((finished.stdout.match(/TOOL partial_tool/g) ?? []).length, 1);
@@ -459,7 +464,7 @@ test('agent:open --wait attaches immediately to an exact active repo run', async
   });
   const observer = startObserver(home, ['owner/repo', '123', '--wait', '--compact'], t);
   await observer.waitFor('PHASE active_wait');
-  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'active-wait-run' }) + '\n');
+  saveObserverArtifact(paths.resultPath, { status: 'review_completed', run_id: 'active-wait-run' });
   const finished = await observer.finish();
   assert.equal(finished.code, 0, finished.stderr);
   assert.match(finished.stdout, /active_wait/);
@@ -485,7 +490,7 @@ test('agent:open --wait skips an old terminal run and attaches only to a new exa
     trace: JSON.stringify({ event: 'phase', time: '2026-09-17T00:00:01.000Z', phase: 'new_exact_run' }) + '\n',
   });
   await observer.waitFor('PHASE new_exact_run');
-  await writeFile(paths.resultPath, JSON.stringify({ status: 'review_completed', run_id: 'new-active-run' }) + '\n');
+  saveObserverArtifact(paths.resultPath, { status: 'review_completed', run_id: 'new-active-run' });
   const finished = await observer.finish();
   assert.equal(finished.code, 0, finished.stderr);
   assert.doesNotMatch(finished.stdout, /old_tool/);
