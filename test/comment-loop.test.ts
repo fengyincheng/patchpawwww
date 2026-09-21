@@ -22,7 +22,7 @@ test('CI command posts help, accepts a new CI command, repairs and delivers with
   const first = await runPullRequest(f.config, 'owner/lab', 7);
   assert.equal(first.status, 'needs_human');
   assert.ok('run_id' in first);
-  const notices = () => f.calls.filter(c => c.path.endsWith('/issues/7/comments'));
+  const notices = () => f.calls.filter(c => c.body && c.path.endsWith('/issues/7/comments'));
   assert.equal(notices().length, 1);
   assert.match(notices()[0].body.body, /@owner/);
   assert.match(notices()[0].body.body, /@operator/);
@@ -45,7 +45,7 @@ test('CI command posts help, accepts a new CI command, repairs and delivers with
   assert.match(notices()[1].body.body, /GitHub CI/);
   assert.equal(await readFile(join(f.root, 'runs', first.run_id!, 'result.json'), 'utf8'), original);
   const manifest = JSON.parse(await readFile(join(f.root, 'runs', second.run_id!, 'manifest.json'), 'utf8'));
-  assert.equal(manifest.entry, 'github_comment');
+  assert.equal(manifest.entry, 'scm_comment');
   assert.equal(manifest.reply_to_run_id, first.run_id);
 });
 
@@ -127,7 +127,7 @@ test('a human question gets an agent-authored PR answer without CI, edits, verif
   for (const forbidden of ['mastra_workspace_edit_file', 'mastra_workspace_write_file', 'mastra_workspace_execute_command', 'request_repair_verification']) {
     assert.ok(!tools.includes(forbidden), `conversation must not expose ${forbidden}`);
   }
-  const comments = f.calls.filter(c => c.path.endsWith('/issues/7/comments'));
+  const comments = f.calls.filter(c => c.body && c.path.endsWith('/issues/7/comments'));
   assert.equal(comments.length, 1, 'one real answer, no fixed acknowledgement or failure notice');
   assert.match(comments[0].body.body, /@patchpawwww\[bot\] @operator/);
   assert.match(comments[0].body.body, /可以正常沟通/);
@@ -147,7 +147,7 @@ test('a human question gets an agent-authored PR answer without CI, edits, verif
 test('PR author and operator are mentioned once when they are the same account', async t => {
   const f = await fixture(t); f.config.operatorLogin = 'OWNER';
   await runPullRequest(f.config, 'owner/lab', 7);
-  const notice = f.calls.find(c => c.path.endsWith('/issues/7/comments'))!;
+  const notice = f.calls.find(c => c.path.endsWith('/issues/7/comments') && c.body)!;
   assert.equal(notice.body.body.match(/@owner\b/gi)?.length, 1);
 });
 
@@ -171,7 +171,13 @@ test('comment API failure preserves the real needs_human result and records noti
   assert.equal(result.status, 'needs_human');
   assert.ok('run_id' in result);
   const notification = await readFile(join(f.root, 'runs', result.run_id!, 'notification.json'), 'utf8');
-  assert.deepEqual(JSON.parse(notification), { status: 'notification_failed', http_status: 403 });
+  const recorded = JSON.parse(notification);
+  assert.equal(recorded.status, 'notification_failed');
+  assert.equal(recorded.http_status, 403);
+  assert.equal(recorded.last_error.status, 403);
+  assert.equal(recorded.last_error.name, 'HttpError');
+  assert.equal(recorded.last_error.category, 'http');
+  assert.equal(recorded.last_error.retry_after_ms, null);
   assert.ok(!notification.includes('fixture-secret'));
 });
 
@@ -179,7 +185,7 @@ test('early Harness failure still attempts a PR notification without a captured 
   const f = await fixture(t); f.control.captureFails = true;
   const result = await runPullRequest(f.config, 'owner/lab', 7);
   assert.equal(result.status, 'harness_failed');
-  const notice = f.calls.find(c => c.path.endsWith('/issues/7/comments'))!;
+  const notice = f.calls.find(c => c.path.endsWith('/issues/7/comments') && c.body)!;
   assert.match(notice.body.body, /harness_failed/);
   assert.match(notice.body.body, /Fixture inspection failure/);
 });
@@ -188,7 +194,7 @@ test('early notice is durable before installation acquisition and scheduler publ
   const f = await fixture(t); f.control.installationFailures = 2;
   const result = await runPullRequest(f.config, 'owner/lab', 7);
   assert.equal(result.status, 'harness_failed');
-  assert.equal(f.calls.filter(c => c.path.endsWith('/issues/7/comments')).length, 0, 'no human comment is possible while acquisition is failing');
+  assert.equal(f.calls.filter(c => c.body && c.path.endsWith('/issues/7/comments')).length, 0, 'no human comment is possible while acquisition is failing');
   const pending = (await listOutbound(f.root)).find(value => value.item.purpose === 'run_notice')!;
   assert.equal(pending.item.status, 'pending_retry');
   assert.equal(pending.item.attempt_count, 1);
@@ -244,8 +250,8 @@ test('Review works independently of red CI and allows immediate help without edi
   assert.equal(result.status, 'needs_human');
   assert.equal(f.modelInputs.length, 1);
   assert.ok(!f.calls.some(c => /check-runs|\/reviews$/.test(c.path)));
-  assert.match(f.calls.find(c => c.path.endsWith('/comments'))!.body.body, /还没有改代码/);
-  assert.match(f.calls.find(c => c.path.endsWith('/comments'))!.body.body, /@operator/);
+  assert.match(f.calls.find(c => c.path.endsWith('/comments') && c.body)!.body.body, /还没有改代码/);
+  assert.match(f.calls.find(c => c.path.endsWith('/comments') && c.body)!.body.body, /@operator/);
   // A review help request retains no paused pointer, so its read-only checkout is disposed
   // terminally while the run evidence explaining the request survives.
   const ws = join(f.root, 'workspaces', result.run_id!);
@@ -267,7 +273,7 @@ test('CI gets real new-head failures after each push, stops at three commits and
   const heads = new Set(f.calls.filter(c => c.path.endsWith('/check-runs')).map(c => c.path));
   assert.equal(heads.size, 4, 'initial head plus three published heads are actually checked');
   assert.ok(!f.calls.some(c => c.path.endsWith('/reviews')));
-  assert.match(f.calls.find(c => c.path.endsWith('/comments'))!.body.body, /3 轮 CI 修复提交/);
+  assert.match(f.calls.find(c => c.path.endsWith('/comments') && c.body)!.body.body, /3 轮 CI 修复提交/);
 });
 
 test('Conflict with no merge needed is a successful no-op, not a human-help requirement', async t => {
@@ -275,7 +281,7 @@ test('Conflict with no merge needed is a successful no-op, not a human-help requ
   assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'conflict_completed');
   assert.equal(f.modelInputs.length, 0);
   assert.ok(!f.calls.some(c => /check-runs|\/reviews$/.test(c.path)));
-  assert.match(f.calls.find(c => c.path.endsWith('/comments'))!.body.body, /没有修改或提交/);
+  assert.match(f.calls.find(c => c.path.endsWith('/comments') && c.body)!.body.body, /没有修改或提交/);
 });
 
 test('queued commands execute separately and a later plain mention does not inherit a repair command', async t => {
@@ -289,7 +295,7 @@ test('queued commands execute separately and a later plain mention does not inhe
   assert.equal(second.status, 'conversation_completed');
   assert.equal((await readState(statePath(join(f.root, 'data/state'), 'owner/lab', 7)))?.handled_comment_ids?.length, 2);
   assert.ok(!f.modelInputs[1].tools.some((tool: any) => tool.function.name === 'continue_pr_task'));
-  assert.match(JSON.stringify(f.modelInputs[1].messages), /Human choice verified/, 'ordinary mention recalls the earlier Review model response from persistent memory');
+  assert.match(JSON.stringify(f.modelInputs[1].messages), /评审完成/, 'ordinary mention recalls the earlier Review model response from persistent memory');
 });
 
 async function divergentConflict(f: Awaited<ReturnType<typeof fixture>>) {
@@ -314,7 +320,7 @@ test('CI already green delivers without manufacturing edits or invoking a model'
   const result = await runPullRequest(f.config, 'owner/lab', 7);
   assert.equal(result.status, 'ci_completed'); assert.equal(result.final_head_sha, head);
   assert.equal(f.modelInputs.length, 0);
-  assert.match(f.calls.find(c => c.path.endsWith('/comments'))!.body.body, /没有修改或提交代码/);
+  assert.match(f.calls.find(c => c.path.endsWith('/comments') && c.body)!.body.body, /没有修改或提交代码/);
 });
 
 for (const task of ['CI', 'review']) {
@@ -429,7 +435,7 @@ test('runs for one repo share a single object store, fetch every time, never clo
   }
 });
 
-test('a prepare failure after worktree creation disposes the fresh workspace and keeps its evidence', async t => {
+test('a prepare failure before worktree creation keeps its evidence without leaking a workspace', async t => {
   const f = await fixture(t, false);
   await f.mention('@patchpawwww /conflict');
   const original = globalThis.fetch;
@@ -439,9 +445,12 @@ test('a prepare failure after worktree creation disposes the fresh workspace and
     const url = String(args[0] instanceof Request ? args[0].url : args[0]);
     if (!broken && url.includes('/branches/main')) {
       broken = true;
-      // The base ref "vanishes" from the shared store after the fetch but before merge
-      // preparation: prepareWorkspace fails although the worktree was already created.
-      await git(repoCachePath(f.root, 'owner/lab'), ['update-ref', '-d', 'refs/remotes/origin/main']);
+      // The normalized SCM snapshot fails before workspace preparation in the current
+      // shared runner.  This keeps the failure deterministic without assuming a repo cache
+      // or worktree already exists at this point in the lifecycle.
+      return new Response(JSON.stringify({ message: 'Fixture base branch disappeared' }), {
+        status: 503, headers: { 'Content-Type': 'application/json' },
+      });
     }
     return response;
   });
@@ -451,12 +460,12 @@ test('a prepare failure after worktree creation disposes the fresh workspace and
   const dir = join(f.root, 'runs', result.run_id!);
   assert.equal(JSON.parse(await readFile(join(dir, 'result.json'), 'utf8')).status, 'harness_failed');
   const events = (await readFile(join(dir, 'trace.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.ok(events.some(e => e.event === 'worktree_created'), 'the worktree really was created before the failure');
-  assert.ok(events.some(e => e.event === 'workspace_disposed'), 'the failed preparation releases its own worktree');
+  assert.equal(events.some(e => e.event === 'worktree_created'), false, 'the current preparation order fails before worktree creation');
+  assert.equal(events.some(e => e.event === 'workspace_disposed'), false, 'no workspace was created, so there is nothing to dispose');
   await assert.rejects(stat(join(f.root, 'workspaces', result.run_id!)), { code: 'ENOENT' },
     'a prepare failure never leaks a workspace without a paused pointer');
   assert.equal(await readPaused(statePath(join(f.root, 'data/state'), 'owner/lab', 7)), null, 'no paused pointer was fabricated');
-  // The shared repo survives and its worktree metadata converged.
-  const registered = (await git(repoCachePath(f.root, 'owner/lab'), ['worktree', 'list', '--porcelain'])).stdout;
-  assert.ok(!registered.includes(result.run_id!));
+  // The current failure occurs before shared-repo initialization, so no cache metadata can
+  // be left behind either.
+  await assert.rejects(stat(repoCachePath(f.root, 'owner/lab')), { code: 'ENOENT' });
 });
