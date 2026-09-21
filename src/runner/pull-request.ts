@@ -99,15 +99,17 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
   let genericApprovalRecovery = await readUnfinishedApprovalPlanClaim(path);
   let priorClose: Pick<RunState, 'closed_at' | 'closed_through_comment_id' | 'close_start_notice_id' | 'close_comment_id' | 'close_mentions' | 'completion_notice_id' | 'completion_notice_status' | 'pending_close_refusal'> | undefined;
   let closeResult: Awaited<ReturnType<typeof runClose>> | undefined;
+  const projectId = scmContext?.projectId ?? repo;
+  let entryConnection: (() => Promise<OutboundConnection>) | undefined;
   try {
-    const entryConnection = scmContext?.connection ?? (async (): Promise<OutboundConnection> => {
+    entryConnection = scmContext?.connection ?? (async (): Promise<OutboundConnection> => {
       if (!github) throw new Error('GitHub connection is unavailable');
       const [owner, name] = repo.split('/');
       const { data: installation } = await github.app.rest.apps.getRepoInstallation({ owner, repo: name });
       return { client: github.installation(installation.id), botLogin };
     });
     const entry = await prepareEntryLifecycle({ config, resolveConnection: entryConnection,
-      repo, prNumber: number, path, appSlug, botLogin });
+      repo, prNumber: number, path, appSlug, botLogin, projectId });
     appSlug = entry.appSlug;
     botLogin = entry.botLogin;
     closeResult = entry.closeResult;
@@ -150,7 +152,6 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
   let snapshotPath: string | undefined = scmContext?.snapshotPath;
   let changeRequest: ChangeRequestSnapshot | undefined = scmContext?.snapshot;
   let scm: ScmAdapter | undefined = scmContext?.adapter;
-  const projectId = scmContext?.projectId ?? repo;
   let confirmedRemoteHead: string | undefined;
   let executionId = 1;
   let workspaceNotice = '';
@@ -193,14 +194,10 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
     return enqueueAndDeliverComment({ root: config.root, repo, prNumber: number, purpose, semanticKey, body, mentions,
       botLogin, source: { project_id: projectId, ...source } }, { adapter: scm, botLogin });
   };
-  const requireScm = () => {
-    if (!scm) throw new Error('SCM adapter is unavailable');
-    return scm;
-  };
   const phase = async (raw: string) => { const value = assertRunPhase(raw); applyRunPhase(state, value);
     await writeState(path, state); trace.emit('phase', { phase: value }); console.log(JSON.stringify({ run_id: runId, phase: value })); };
   const finish = (status: string, extra: { reason?: string; message?: string; [key: string]: unknown } = {}, persistedPhase = status) => finishRun({
-    root: config.root, repo, prNumber: number, projectId, runId, executionId, statePath: path, state, trace, scm: requireScm(), botLogin, activeTask, approvedConflictRepair,
+    root: config.root, repo, prNumber: number, projectId, runId, executionId, statePath: path, state, trace, scm, resolveConnection: entryConnection, botLogin, activeTask, approvedConflictRepair,
     activeWorkspace, changeRequest, confirmedRemoteHead, stop, workspaceNotice, recipients,
     genericApprovalClaim: genericApprovalClaim ? approvalPlanBinding(genericApprovalClaim) : undefined, phase, settleGenericApprovalClaim,
   }, status, extra, persistedPhase);
@@ -243,7 +240,7 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
     // A failed notice waits in the tiny state outbox (pending_close_refusal) and the next
     // PatchPaw entry retries it deterministically.
     const refuseClose = (comment: HumanReply) => refuseCloseOnActiveTask({
-    root: config.root, repo, prNumber: number, runId, statePath: path, state, trace, botLogin, connection: async () => {
+    root: config.root, repo, prNumber: number, runId, statePath: path, state, trace, projectId, botLogin, connection: async () => {
       if (scm) return { adapter: scm, botLogin };
       if (!github) throw new Error('GitHub connection is unavailable');
       const [owner, name] = repo.split('/');

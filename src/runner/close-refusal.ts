@@ -12,6 +12,7 @@ export interface CloseRefusalInput {
   statePath: string;
   state: RunState;
   trace: Trace;
+  projectId: string;
   connection: () => Promise<OutboundConnection>;
   botLogin: string;
   comment: HumanReply;
@@ -26,7 +27,7 @@ export async function refuseCloseOnActiveTask(input: CloseRefusalInput): Promise
   try {
     const stored = await enqueueCommentDelivery({ root, repo, prNumber, purpose: 'close_refusal',
       semanticKey: `close-refusal:${comment.comment_id}`, body: closeRefusalBody, mentions: [comment.author], botLogin,
-      source: { comment_id: comment.comment_id, run_id: runId } });
+      source: { project_id: input.projectId, comment_id: comment.comment_id, run_id: runId } });
     const delivered = await deliverImmediately(root, stored, { ...await input.connection(), botLogin });
     if (delivered.item.status === 'delivered') {
       state.pending_close_refusal = undefined;

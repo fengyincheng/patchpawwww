@@ -19,6 +19,7 @@ export interface EntryLifecycleInput {
   path: string;
   appSlug?: string;
   botLogin: string;
+  projectId?: string;
 }
 
 export interface EntryLifecycleResult {
@@ -47,11 +48,12 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
     if (closeSlug && parsePRTask(oldest.body, closeSlug) === 'close') {
       const [owner, name] = repo.split('/');
       const mentions = [oldest.author, config.operatorLogin ?? owner].filter((login): login is string => !!login);
-      const closeConnection = await connection();
-      const prepared = await prepareCloseStart(config, repo, prNumber, path, { comment_id: oldest.comment_id, mentions, bot_login: botLogin, connection: closeConnection });
+      const projectId = input.projectId ?? repo;
+      const prepared = await prepareCloseStart(config, repo, prNumber, path, { comment_id: oldest.comment_id, mentions, bot_login: botLogin, projectId });
       try {
+        const closeConnection = await connection();
         closeResult = await runClose(config, repo, prNumber, path, { comment_id: oldest.comment_id, connection: closeConnection,
-          mentions, bot_login: botLogin });
+          mentions, bot_login: botLogin, projectId });
       } catch (error) {
         if (!prepared.start) throw error;
         const deferred = await deferDelivery(config.root, prepared.start, error);
@@ -60,9 +62,9 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
     }
   }
   if (!closeResult && await hasPendingClose(path)) {
-    const prepared = await preparePendingCloseStart(config, repo, prNumber, path, botLogin);
+    const prepared = await preparePendingCloseStart(config, repo, prNumber, path, botLogin, input.projectId);
     try {
-      closeResult = await resumePendingClose(config, repo, prNumber, path, await connection(), botLogin);
+      closeResult = await resumePendingClose(config, repo, prNumber, path, await connection(), botLogin, input.projectId);
     } catch (error) {
       if (!prepared?.start) throw error;
       const deferred = await deferDelivery(config.root, prepared.start, error);
@@ -80,7 +82,7 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
           const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber, purpose: 'close_refusal',
             semanticKey: 'close-refusal:' + refusal.comment_id, body: closeRefusalBody,
             mentions: [refusal.author ?? bot].filter((login): login is string => !!login), botLogin: bot,
-            source: { comment_id: refusal.comment_id } });
+            source: { project_id: input.projectId ?? repo, comment_id: refusal.comment_id } });
           const delivered = await deliverImmediately(config.root, stored, { ...await client(), botLogin: bot });
           if (delivered.item.status === 'delivered') {
             const cleared = await readState(path);

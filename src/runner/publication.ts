@@ -8,6 +8,7 @@ import {
   enqueueAndDeliverComment,
   enqueueCommentDelivery,
   type DeliveryAttempt,
+  type OutboundConnection,
 } from './outbound.ts';
 import { closeoutMarker } from './closeout-publication.ts';
 
@@ -83,7 +84,8 @@ export interface RunNoticePublicationInput {
   trace: Trace;
   notice: RunNotice;
   botLogin?: string;
-  adapter: ScmAdapter;
+  adapter?: ScmAdapter;
+  resolveConnection?: () => Promise<OutboundConnection>;
 }
 
 function notificationArtifact(publication: TaskPublication) {
@@ -119,7 +121,11 @@ export async function publishRunNotice(input: RunNoticePublicationInput) {
     });
     let publication: TaskPublication;
     try {
-      publication = (await deliverImmediately(input.root, stored, { adapter: input.adapter, botLogin: input.botLogin })).publication;
+      const connection = input.adapter
+        ? { adapter: input.adapter, botLogin: input.botLogin }
+        : await input.resolveConnection?.();
+      if (!connection) throw new Error('SCM delivery connection is unavailable');
+      publication = (await deliverImmediately(input.root, stored, connection)).publication;
     } catch (error) {
       publication = (await deferDelivery(input.root, stored, error)).publication;
     }

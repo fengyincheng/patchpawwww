@@ -128,7 +128,7 @@ async function retireConflictApprovalLifecycle(root: string, repo: string, numbe
 // This is deliberately local-only. It records the close intent, deletion inventory and
 // start notice before any installation or App metadata request is attempted.
 export async function prepareCloseStart(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string,
-  input: { comment_id: number; mentions: string[]; bot_login?: string; connection?: OutboundConnection }): Promise<ClosePreparation> {
+  input: { comment_id: number; mentions: string[]; bot_login?: string; connection?: OutboundConnection; projectId?: string }): Promise<ClosePreparation> {
   const state = await readState(path);
   const previousJournal = await readJournal(path);
   const replies = await readHumanReplies(path);
@@ -160,25 +160,25 @@ export async function prepareCloseStart(config: { root: string; snapshotRoot: st
   await retireConflictApprovalLifecycle(config.root, repo, number, path, false);
   const start = journal.start_notice_id ? undefined : await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose: 'close_start',
     semanticKey: `close-start:${journal.close_comment_id}`, body: closeStartBodyFor(repo, input.connection), mentions: journal.mentions,
-    botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id, closed_through: closedThrough,
+    botLogin: input.bot_login, source: { project_id: input.projectId ?? repo, close_comment_id: journal.close_comment_id, closed_through: closedThrough,
       memory_file: memoryFile, snapshot_dir: snapshots } });
   return { journal, runIds, start, closedThrough, memoryFile, snapshots };
 }
 
 export async function preparePendingCloseStart(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number,
-  path: string, botLogin?: string) {
+  path: string, botLogin?: string, projectId?: string) {
   const journal = await readJournal(path);
   if (!journal || journal.status !== 'closing') return undefined;
-  return prepareCloseStart(config, repo, number, path, { comment_id: journal.close_comment_id, mentions: journal.mentions, bot_login: botLogin });
+  return prepareCloseStart(config, repo, number, path, { comment_id: journal.close_comment_id, mentions: journal.mentions, bot_login: botLogin, projectId });
 }
 
 export async function runClose(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string,
-  input: { comment_id: number; connection: OutboundConnection; mentions: string[]; bot_login?: string }) {
+  input: { comment_id: number; connection: OutboundConnection; mentions: string[]; bot_login?: string; projectId?: string }) {
   const state = await readState(path);
   // Defensive: routing already refuses active workers; never delete underneath a live task.
   if (workerStatus(state) === 'running' && state?.pid !== process.pid) return { status: 'close_refused_active_worker' };
 
-  const prepared = await prepareCloseStart(config, repo, number, path, { ...input, connection: input.connection });
+  const prepared = await prepareCloseStart(config, repo, number, path, { ...input, connection: input.connection, projectId: input.projectId });
   const { journal, runIds, closedThrough, memoryFile, snapshots } = prepared;
 
   // C. The machine-authored start comment is the human's external audit marker and must be
@@ -245,7 +245,7 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
       await saveJournal(path, journal);
       try { await enqueueAndDeliverComment({ root: config.root, repo, prNumber: number, purpose: 'close_failure',
         semanticKey: `close-failure:${journal.close_comment_id}:${step}`, body: closeFailedBodyFor(repo, input.connection, step), mentions: input.mentions,
-        botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id, step } }, { ...input.connection, botLogin: input.bot_login ?? input.connection.botLogin }); } catch { /* durable item remains */ }
+        botLogin: input.bot_login, source: { project_id: input.projectId ?? repo, close_comment_id: journal.close_comment_id, step } }, { ...input.connection, botLogin: input.bot_login ?? input.connection.botLogin }); } catch { /* durable item remains */ }
       return { status: 'close_incomplete', step };
     }
   }
@@ -255,7 +255,7 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
   try {
     const result = await enqueueAndDeliverComment({ root: config.root, repo, prNumber: number, purpose: 'close_completion',
       semanticKey: `close-completion:${journal.close_comment_id}`, body: closeCompleteBodyFor(repo, input.connection), mentions: input.mentions,
-      botLogin: input.bot_login, source: { close_comment_id: journal.close_comment_id } }, { ...input.connection, botLogin: input.bot_login ?? input.connection.botLogin });
+      botLogin: input.bot_login, source: { project_id: input.projectId ?? repo, close_comment_id: journal.close_comment_id } }, { ...input.connection, botLogin: input.bot_login ?? input.connection.botLogin });
     if (result.item.status !== 'delivered') {
       journal.status = 'completed'; journal.last_step = 'completion_notice_pending'; await saveJournal(path, journal);
       return { status: 'closed', completion_notice_status: 'pending', run_ids: journal.run_ids.length };
@@ -301,8 +301,8 @@ export async function retryPendingCloseCompletion(path: string, repo: string, nu
 export async function hasPendingClose(path: string) {
   return (await readJournal(path))?.status === 'closing';
 }
-export async function resumePendingClose(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string, connection: OutboundConnection, botLogin?: string) {
+export async function resumePendingClose(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string, connection: OutboundConnection, botLogin?: string, projectId?: string) {
   const journal = await readJournal(path);
   if (!journal || journal.status !== 'closing') return undefined;
-  return runClose(config, repo, number, path, { comment_id: journal.close_comment_id, connection, mentions: journal.mentions, bot_login: botLogin });
+  return runClose(config, repo, number, path, { comment_id: journal.close_comment_id, connection, mentions: journal.mentions, bot_login: botLogin, projectId });
 }

@@ -10,6 +10,7 @@ import type { RunFailure } from './failures.ts';
 import { type RunState } from './state.ts';
 import { Trace } from '../harness/trace.ts';
 import { watchStop } from './stop.ts';
+import type { OutboundConnection } from './outbound.ts';
 
 type FinishExtra = { reason?: string; message?: string; [key: string]: unknown };
 type Phase = (raw: string) => Promise<void>;
@@ -36,7 +37,8 @@ export interface RunFinalizerInput {
   statePath: string;
   state: RunState;
   trace: Trace;
-  scm: ScmAdapter;
+  scm?: ScmAdapter;
+  resolveConnection?: () => Promise<OutboundConnection>;
   botLogin: string;
   activeTask: string;
   approvedConflictRepair: boolean;
@@ -92,7 +94,7 @@ export async function finishRun(input: RunFinalizerInput, status: string, extra:
       mentions: input.recipients(), bot_login: input.botLogin }));
     trace.save('run-notice.json', notice);
     await publishRunNotice({ root: input.root, repo: input.repo, prNumber: input.prNumber, projectId: input.projectId, trace, notice,
-      botLogin: input.botLogin || undefined, adapter: input.scm });
+      botLogin: input.botLogin || undefined, adapter: input.scm, resolveConnection: input.resolveConnection });
   }
   if (genericApprovalClaim) await input.settleGenericApprovalClaim(status.endsWith('_completed') ? 'completed' : 'interrupted');
   return result;
