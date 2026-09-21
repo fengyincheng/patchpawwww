@@ -13,6 +13,7 @@ import { GitLabClient } from '../src/scm/gitlab/client.ts';
 import type { ScmConnection } from '../src/scm/types.ts';
 import { hasHumanReplies, saveHumanReply, readHumanReplies } from '../src/runner/human-feedback.ts';
 import { statePath, readState } from '../src/runner/state.ts';
+import { readCurrentApprovalPlan } from '../src/runner/approval-plans.ts';
 import { patchpawPaths } from '../src/config/paths.ts';
 import { bootstrapControlPlane, closeControlPlaneDb, createCommand, createPrompt, listPrompts, listSkills, openControlPlaneDb, setProviderCredential } from '../src/control-plane/index.ts';
 import { deliverImmediately, listOutbound } from '../src/runner/outbound.ts';
@@ -199,7 +200,8 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
       if (control.repairStep++ === 0) tool = control.mode === 'conflict'
         ? { name: 'mastra_workspace_execute_command', args: { command: "printf 'resolved\\n' > sample.txt && git add sample.txt" } }
         : { name: 'mastra_workspace_edit_file', args: { path: 'sample.txt', old_string: 'base', new_string: 'fixed' } };
-      else tool = { name: 'request_repair_verification', args: { summary: '修复完成。', tests: ['test -f sample.txt'], validation_not_applicable: null } };
+      else return json({ id: `repair-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
+        message: { role: 'assistant', content: '修复完成：已完成候选修改并确认工作区状态。' }, finish_reason: 'stop' }] });
     } else if (control.mode === 'stop' || control.mode === 'active-close') {
       tool = { name: 'request_human_help', args: { reason: '测试任务等待人工处理。' } };
     } else if (control.mode === 'conflict') {
@@ -300,7 +302,8 @@ test('GitLab worker repair pushes only the same-project source branch before pub
   const lastHeadRead = fixture.control.apiCalls.map((value, index) => value.path.endsWith('/merge_requests/3') ? index : -1).reduce((last, index) => Math.max(last, index), -1);
   const notePublish = fixture.control.apiCalls.map((value, index) => value.method === 'POST' && value.path.endsWith('/merge_requests/3/notes') ? index : -1).reduce((last, index) => Math.max(last, index), -1);
   assert.ok(lastHeadRead >= 0 && notePublish > lastHeadRead);
-  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('## GitLab repair')));
+  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes(afterFeature)));
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'delivery_report')?.item.status, 'delivered');
   assert.ok(fixture.control.apiCalls.filter(value => value.path.endsWith('/merge_requests/3')).length >= 2);
 });
 
@@ -316,7 +319,7 @@ test('GitLab custom read_write pushes an Agent commit without a duplicate Harnes
   assert.equal((await git(fixture.remote.bare, ['log', '-1', '--format=%s', after])).stdout.trim(), 'Agent authored custom fix');
   assert.equal(typeof (result as any).run_id, 'string');
   assert.equal((await readFile(join(fixture.root, 'runs', (result as any).run_id, 'trace.jsonl'), 'utf8')).includes('"source":"agent"'), true);
-  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('PatchPaw writeback') && note.body.includes(after)));
+  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('PatchPaw 提交') && note.body.includes(after)));
 });
 
 test('GitLab custom read_write lets the Harness commit an uncommitted Agent change', async t => {
@@ -329,8 +332,12 @@ test('GitLab custom read_write lets the Harness commit an uncommitted Agent chan
   assert.notEqual(after, before);
   assert.equal((await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim(), '1');
   assert.equal((await git(fixture.remote.bare, ['log', '-1', '--format=%s', after])).stdout.trim(), 'fix: PatchPaw custom repair');
-  assert.equal((result as any).writeback, 'pushed');
-  assert.equal((result as any).commit_sha, after);
+  assert.equal((await readState(fixture.path))?.phase, 'custom_completed');
+  assert.equal((await readState(fixture.path))?.current_head_sha, after);
+  assert.equal((await readState(fixture.path))?.last_patchpaw_commit, after);
+  const delivery = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'delivery_report');
+  assert.equal(delivery?.item.status, 'delivered');
+  assert.ok(delivery?.item.receipt?.id);
 });
 
 test('GitLab custom read_write commits residual dirty changes after an Agent commit', async t => {
@@ -343,7 +350,8 @@ test('GitLab custom read_write commits residual dirty changes after an Agent com
   assert.equal((await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim(), '2');
   assert.equal((await git(fixture.remote.bare, ['show', `${after}:sample.txt`])).stdout, 'agent\n');
   assert.equal((await git(fixture.remote.bare, ['show', `${after}:residual.txt`])).stdout, 'residual\n');
-  assert.equal((result as any).commit_sha, after);
+  assert.equal((await readState(fixture.path))?.current_head_sha, after);
+  assert.equal((await readState(fixture.path))?.last_patchpaw_commit, after);
 });
 
 test('GitLab custom read_write no-op publishes without committing or pushing', async t => {
@@ -354,7 +362,10 @@ test('GitLab custom read_write no-op publishes without committing or pushing', a
   const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
   assert.equal(result?.status, 'custom_completed');
   assert.equal(after, before);
-  assert.equal((result as any).writeback, 'no_changes');
+  assert.equal((await readState(fixture.path))?.phase, 'custom_completed');
+  assert.equal((await readState(fixture.path))?.current_head_sha, before);
+  assert.equal((await readState(fixture.path))?.last_patchpaw_commit, null);
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'delivery_report')?.item.status, 'delivered');
   assert.equal(fixture.control.apiCalls.some(call => call.method === 'POST' && call.path.endsWith('/repository/commits')), false);
 });
 
@@ -364,9 +375,10 @@ test('GitLab custom writeback publication recovery retries the durable Note with
   const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
   const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
-  assert.equal(result?.status, 'needs_human');
+  assert.equal(result?.status, 'custom_completed');
   assert.notEqual(after, before);
-  const stored = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'custom_completed');
+  assert.equal((await readState(fixture.path))?.phase, 'custom_completed');
+  const stored = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'delivery_report');
   assert.ok(stored); assert.equal(stored!.item.status, 'blocked');
   const modelCalls = fixture.control.modelCalls;
   const commits = (await git(fixture.remote.bare, ['rev-list', '--count', `${before}..${after}`])).stdout.trim();
@@ -388,7 +400,10 @@ test('GitLab custom read_write blocks an Agent-authored push and keeps Harness w
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
   assert.equal(result?.status, 'custom_completed');
   assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
-  assert.equal((result as any).writeback, 'no_changes');
+  assert.equal((await readState(fixture.path))?.phase, 'custom_completed');
+  assert.equal((await readState(fixture.path))?.current_head_sha, before);
+  assert.equal((await readState(fixture.path))?.last_patchpaw_commit, null);
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'delivery_report')?.item.status, 'delivered');
   assert.equal(fixture.control.modelCalls, 2, 'the blocked command is returned to the Agent as a tool error');
 });
 
@@ -398,7 +413,10 @@ test('GitLab custom read_write fails closed when the remote MR head drifts befor
   const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
   const after = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
-  assert.equal(result?.status, 'needs_human'); assert.notEqual(after, before);
+  assert.equal(result?.status, 'harness_failed'); assert.notEqual(after, before);
+  assert.equal((await readState(fixture.path))?.phase, 'harness_failed');
+  assert.equal((await readState(fixture.path))?.current_head_sha, before);
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice')?.item.status, 'delivered');
   assert.equal((await git(fixture.remote.bare, ['show', `${after}:drift.txt`])).stdout, 'feature drift\n');
   assert.equal((await git(fixture.remote.bare, ['log', '-1', '--format=%s', after])).stdout.trim(), 'External feature drift');
 });
@@ -409,7 +427,10 @@ test('GitLab custom read_write fails closed when the target branch drifts before
   const beforeFeature = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
   const beforeMain = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/main'])).stdout.trim();
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
-  assert.equal(result?.status, 'needs_human');
+  assert.equal(result?.status, 'harness_failed');
+  assert.equal((await readState(fixture.path))?.phase, 'harness_failed');
+  assert.equal((await readState(fixture.path))?.current_head_sha, beforeFeature);
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice')?.item.status, 'delivered');
   assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), beforeFeature);
   assert.notEqual((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/main'])).stdout.trim(), beforeMain);
 });
@@ -419,7 +440,9 @@ test('GitLab custom read_write rejects rewritten candidate history before push',
   await fixture.addComment(100, '@patchpaw /edit');
   const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
-  assert.equal(result?.status, 'needs_human');
+  assert.equal(result?.status, 'harness_failed');
+  assert.equal((await readState(fixture.path))?.phase, 'harness_failed');
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice')?.item.status, 'delivered');
   assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
   assert.ok(fixture.control.apiCalls.every(call => !call.path.endsWith('/repository/commits')));
 });
@@ -430,7 +453,7 @@ test('GitLab custom read_write rejects fork MRs before starting the Agent', asyn
   const before = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
   assert.equal(result?.status, 'needs_human');
-  assert.equal((result as any).reason, 'GitLab fork MR custom read/write is read-only; no cross-project push is attempted.');
+  assert.match(String((result as any).reason), /fork/i);
   assert.equal(fixture.control.normalModelCalls, 0);
   assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
 });
@@ -442,25 +465,40 @@ test('GitLab custom read_only keeps the existing non-writing behavior', async t 
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
   assert.equal(result?.status, 'custom_completed');
   assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), before);
-  assert.equal((result as any).writeback, undefined);
+  assert.equal((await readState(fixture.path))?.phase, 'custom_completed');
+  assert.equal((await readState(fixture.path))?.current_head_sha, before);
+  assert.equal((await readState(fixture.path))?.last_patchpaw_commit, null);
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'delivery_report')?.item.status, 'delivered');
 });
 
-test('GitLab conflict proposal stays read-only until approval, then pushes the bound repair', async t => {
+test('GitLab conflict Approval Plan stays read-only until approval, then pushes the bound repair', async t => {
   const fixture = await workerFixture(t, 'conflict', true); await fixture.addComment(100, '@patchpaw /conflict');
   const initialFeature = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
   const proposalResult = await runGitLabMergeRequest(fixture.config, repo, 3);
   assert.equal(proposalResult?.status, 'awaiting_approval');
   assert.equal((await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim(), initialFeature);
-  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('Conflict Proposal')));
+  const planPublication = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'approval_plan');
+  assert.equal(planPublication?.item.status, 'delivered');
+  const publishedPlan = await readCurrentApprovalPlan(fixture.path);
+  assert.equal(publishedPlan?.plan.status, 'published');
+  assert.equal(publishedPlan?.plan.publication?.remote_id, planPublication?.item.receipt?.id);
   fixture.control.mode = 'conflict'; await fixture.addComment(800, '@patchpaw /approval');
   const approvalResult = await runGitLabMergeRequest(fixture.config, repo, 3);
   const finalFeature = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
-  assert.equal(approvalResult?.status, 'repair_completed'); assert.notEqual(finalFeature, initialFeature);
-  assert.equal((await readState(fixture.path))?.phase, 'repair_completed');
+  assert.equal(approvalResult?.status, 'conflict_completed'); assert.notEqual(finalFeature, initialFeature);
+  const state = await readState(fixture.path);
+  assert.equal(state?.phase, 'conflict_completed');
+  assert.equal(state?.current_head_sha, finalFeature);
+  assert.equal(state?.last_patchpaw_commit, finalFeature);
+  const approvedPlan = await readCurrentApprovalPlan(fixture.path);
+  assert.equal(approvedPlan?.plan.status, 'approved');
+  assert.equal(approvedPlan?.approval?.source_comment_id, 800);
+  assert.equal(approvedPlan?.approval?.phase, 'completed');
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'delivery_report')?.item.status, 'delivered');
   assert.equal(fixture.control.normalModelCalls >= 3, true);
   assert.ok(fixture.control.apiCalls.some(value => value.path.endsWith('/users/17')));
   assert.ok(fixture.control.apiCalls.some(value => value.path.endsWith('/members/all/17')));
-  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('GitLab Conflict 修复完成')));
+  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('## Conflict 修复完成')));
 });
 
 test('GitLab worker /stop aborts the active generation and retains its workspace', async t => {
@@ -475,7 +513,8 @@ test('GitLab worker /stop aborts the active generation and retains its workspace
   const paused = await readFileIfPresent(`${fixture.path}.paused.json`);
   assert.ok(paused?.includes('workspaces'));
   assert.equal(fixture.control.normalModelCalls, 1);
-  assert.equal(fixture.control.remoteNotes.filter(note => note.author.id === 900).length, 0);
+  assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900));
+  assert.equal((await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice')?.item.status, 'delivered');
 });
 
 test('GitLab active /close is durably refused and never runs cleanup', async t => {
@@ -506,13 +545,12 @@ test('GitLab provider failure publishes a classified durable MR Note', async t =
   assert.equal((result as any).failure.user_action, 'retry');
   assert.equal((result as any).failure.upstream_status, 429);
   assert.equal((result as any).failure.attempts, 4);
-  assert.equal((result as any).notification.status, 'published');
   assert.equal((await readState(fixture.path))?.phase, 'provider_unavailable');
   const runResult = JSON.parse(await readFile(join(fixture.root, 'runs', (result as any).run_id, 'result.json'), 'utf8'));
   assert.equal(runResult.status, 'provider_unavailable');
   assert.equal(runResult.failed_phase, 'repair');
   assert.equal(runResult.failure.code, 'provider_upstream_unavailable');
-  assert.equal(runResult.notification.status, 'published');
+  assert.equal(JSON.parse(await readFile(join(fixture.root, 'runs', (result as any).run_id, 'notification.json'), 'utf8')).status, 'published');
   const runNotice = JSON.parse(await readFile(join(fixture.root, 'runs', (result as any).run_id, 'run-notice.json'), 'utf8'));
   assert.equal(runNotice.phase, 'repair');
   const trace = await readFile(join(fixture.root, 'runs', (result as any).run_id, 'trace.jsonl'), 'utf8');
@@ -538,14 +576,13 @@ test('GitLab failure Note publication keeps the primary failure and does not rer
   const result = await runGitLabMergeRequest(fixture.config, repo, 3);
   assert.equal(result?.status, 'provider_unavailable');
   assert.equal((result as any).failure.code, 'provider_upstream_unavailable');
-  assert.equal((result as any).notification.status, 'blocked');
   assert.equal((await readState(fixture.path))?.phase, 'provider_unavailable');
   const runDir = join(fixture.root, 'runs', (result as any).run_id);
   assert.equal(JSON.parse(await readFile(join(runDir, 'result.json'), 'utf8')).failed_phase, 'repair');
   assert.equal(JSON.parse(await readFile(join(runDir, 'run-notice.json'), 'utf8')).phase, 'repair');
+  assert.equal(JSON.parse(await readFile(join(runDir, 'notification.json'), 'utf8')).status, 'notification_failed');
   const events = (await readFile(join(runDir, 'trace.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.ok(events.some(event => event.event === 'run_notice_pending'));
-  assert.equal(events.filter(event => event.event === 'run_notice_published').length, 0);
+  assert.equal(events.filter(event => event.event === 'run_notice_published').length, 1);
   const modelCalls = fixture.control.modelCalls;
   const stored = (await listOutbound(fixture.root)).find(value => value.item.purpose === 'run_notice');
   assert.ok(stored); assert.equal(stored!.item.status, 'blocked');
@@ -579,12 +616,12 @@ test('GitLab connection bootstrap failures persist terminal evidence', async t =
       assert.equal(result?.status, 'harness_failed');
       assert.equal((result as any).failure.code, testCase.expected);
       assert.equal((result as any).failure.scm_platform, 'gitlab');
-      assert.equal((result as any).notification.status, 'not_attempted');
       const runDir = join(fixture.root, 'runs', (result as any).run_id);
       const persisted = JSON.parse(await readFile(join(runDir, 'result.json'), 'utf8'));
       assert.equal(persisted.status, 'harness_failed');
       assert.equal(persisted.failed_phase, 'bootstrap');
       assert.equal(persisted.failure.code, testCase.expected);
+      assert.equal(JSON.parse(await readFile(join(runDir, 'notification.json'), 'utf8')).status, 'not_attempted');
       assert.equal((await readState(statePath(patchpawPaths(fixture.root).state, targetRepo, 3)))?.active, false);
       const trace = await readFile(join(runDir, 'trace.jsonl'), 'utf8');
       assert.match(trace, /"event":"run_error"/);
