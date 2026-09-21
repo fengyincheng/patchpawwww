@@ -7,6 +7,7 @@ import { runPullRequest } from '../src/runner/pull-request.ts';
 import { saveHumanReply } from '../src/runner/human-feedback.ts';
 import { statePath, readState } from '../src/runner/state.ts';
 import { budget } from '../src/harness/budget.ts';
+import { Trace } from '../src/harness/trace.ts';
 import { readPaused, savePaused } from '../src/runner/resume.ts';
 import { recoverRun } from '../src/runner/recovery.ts';
 import { repoCachePath } from '../src/workspace/repo-store.ts';
@@ -468,4 +469,41 @@ test('a prepare failure before worktree creation keeps its evidence without leak
   // The current failure occurs before shared-repo initialization, so no cache metadata can
   // be left behind either.
   await assert.rejects(stat(repoCachePath(f.root, 'owner/lab')), { code: 'ENOENT' });
+});
+
+test('a preparation failure after worktree creation still disposes the workspace', async t => {
+  const f = await fixture(t, false);
+  await f.mention('@patchpawwww /conflict');
+  const original = Trace.prototype.emit;
+  let createdWorkspace: string | undefined;
+  t.mock.method(Trace.prototype, 'emit', function (this: Trace, event: string, data: object = {}) {
+    original.call(this, event, data);
+    if (event === 'worktree_created' && 'workspace' in data && typeof data.workspace === 'string') {
+      createdWorkspace = data.workspace;
+      // Git has created and registered the worktree, but prepareWorkspace has not returned.
+      // This exercises cleanup through createdWorkspace before activeWorkspace is assigned.
+      throw new Error('Fixture preparation failure after worktree creation');
+    }
+  });
+
+  const result = await runPullRequest(f.config, 'owner/lab', 7);
+  assert.equal(result.status, 'harness_failed');
+  assert.ok('run_id' in result);
+  const dir = join(f.root, 'runs', result.run_id!);
+  assert.ok(createdWorkspace);
+  const persisted = JSON.parse(await readFile(join(dir, 'result.json'), 'utf8'));
+  assert.equal(persisted.failed_phase, 'workspace');
+  assert.match(persisted.message, /Fixture preparation failure after worktree creation/);
+  const events = (await readFile(join(dir, 'trace.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(events.some(e => e.event === 'worktree_created' && e.workspace === createdWorkspace),
+    'the injected failure must happen after worktree creation');
+  assert.ok(events.some(e => e.event === 'workspace_disposed' && e.workspace === createdWorkspace),
+    'a post-worktree preparation failure must dispose the workspace');
+  await assert.rejects(stat(createdWorkspace), { code: 'ENOENT' },
+    'a failed prepared run must not leak its workspace');
+  assert.equal(await readPaused(statePath(join(f.root, 'data/state'), 'owner/lab', 7)), null,
+    'a preparation failure does not fabricate a retained workspace');
+  assert.equal(f.modelInputs.length, 0);
+  const registered = await git(repoCachePath(f.root, 'owner/lab'), ['worktree', 'list', '--porcelain']);
+  assert.ok(!registered.stdout.includes(createdWorkspace), 'cleanup also removes Git worktree registration');
 });
