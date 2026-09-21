@@ -99,7 +99,11 @@ test('a killed worker releases kernel ownership and the next process can reclaim
   const source = `import { claimRun } from ${JSON.stringify(new URL('../src/runner/state.ts', import.meta.url).href)};
     const release = await claimRun(${JSON.stringify(path)}); if (!release) process.exit(2);
     console.log('acquired'); setInterval(() => {}, 1000);`;
-  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const childEnv = { ...process.env };
+  delete childEnv.NODE_TEST_CONTEXT;
+  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], {
+    env: childEnv, stdio: ['ignore', 'pipe', 'pipe'],
+  });
   const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
   await new Promise<void>((resolve, reject) => { child.stdout.once('data', () => resolve()); child.once('error', reject);
     child.once('exit', () => reject(new Error('Fixture worker failed before acquiring lock'))); });
