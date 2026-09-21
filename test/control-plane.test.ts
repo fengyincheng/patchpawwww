@@ -31,12 +31,15 @@ import {
   listProviderModels,
   listProviders,
   listSkills,
+  newRunBuiltinPrompts,
   openControlPlaneDb,
   PROVIDER_TYPES,
   SecretStore,
   setProviderCredential,
   updateCommand,
   updatePrompt,
+  CONTROL_PLANE_MIGRATION_VERSION,
+  CONTROL_PLANE_SCHEMA_VERSION,
 } from '../src/control-plane/index.ts';
 
 const expectCode = async (promise: Promise<unknown>, code: ControlPlaneError['code']) => {
@@ -48,8 +51,8 @@ test('control-plane schema, paths, revisions, copy independence, and atomic comm
   const db = await openControlPlaneDb(root);
   try {
     assert.equal((await db.execute('PRAGMA journal_mode')).rows[0].journal_mode, 'wal');
-    assert.equal(await db.getMeta('schema_version'), '3');
-    assert.equal(await db.getMeta('migration_version'), '3');
+    assert.equal(await db.getMeta('schema_version'), CONTROL_PLANE_SCHEMA_VERSION);
+    assert.equal(await db.getMeta('migration_version'), String(CONTROL_PLANE_MIGRATION_VERSION));
     assert.equal(patchpawPaths(root).controlPlaneDb, db.path);
     assert.notEqual(db.path, patchpawPaths(root).communicationDb);
 
@@ -134,7 +137,7 @@ test('bootstrap is isolated, seeds every source asset, and is idempotent under c
     assert.equal(commands.find(command => command.slashName === 'review')?.permission, 'read_only');
     assert.equal(commands.find(command => command.slashName === 'ci')?.permission, 'read_write');
     assert.ok(await getConversationProfile(db, managed.id));
-    assert.equal((await listPrompts(db, { scope: 'repository', repositoryId: managed.id })).length, first.publicPrompts.length);
+    assert.equal((await listPrompts(db, { scope: 'repository', repositoryId: managed.id })).length, newRunBuiltinPrompts().length);
     assert.equal((await listSkills(db, { scope: 'repository', repositoryId: managed.id })).length, 1);
     const removable = (await listPrompts(db, { scope: 'repository', repositoryId: managed.id })).find(asset => asset.slug === 'runtime-budget')!;
     await deletePrompt(db, removable.id, { expectedRevision: removable.revision });
