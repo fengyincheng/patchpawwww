@@ -57,13 +57,13 @@ async function withProvider(replies: Reply[], run: (requests: any[]) => Promise<
   }
 }
 
-// Stage 06 makes runConflict read-only. These lower-level tests still exercise the generic
-// repair verification loop, so they call that loop explicitly instead of treating Conflict as a
-// repair-capable task.
+// Fresh Runner tasks use opaque natural-language outcomes. This file is intentionally limited to
+// the legacy structured repair/closeout compatibility path plus independent workspace safety
+// checks; fresh completion contracts are covered by the shared runner tests.
 const runDirectConflictRepair = (options: Awaited<ReturnType<typeof fixture>>, seed: unknown) =>
   runRepair({ ...options, task: 'conflict', prompt: '' }, seed);
 
-test('the generic repair loop accepts a structured verification request, returns real failure, and verifies a same-session repair without parsing prose', async () => {
+test('legacy structured repair compatibility: verification failure and same-session repair', async () => {
   const options = await fixture();
   const request = { summary: 'fixture repair', tests: [nodeFileEquals('sample.txt', 'after\n')], validation_not_applicable: null };
   await withProvider([
@@ -84,14 +84,14 @@ test('the generic repair loop accepts a structured verification request, returns
   });
 });
 
-test('CI Repair ignores an agent-authored repaired JSON when no verification was requested', async () => {
+test('legacy structured repair compatibility: agent-authored JSON is not a verification request', async () => {
   const options = await fixture();
   await withProvider([{ text: JSON.stringify({ status: 'repaired', summary: 'claimed success', tests: [nodeExit(0)], validation_not_applicable: null }) }], async () => {
     assert.equal((await runCIRepair(options, { task: 'fixture' })).status, 'budget_exhausted');
   });
 });
 
-test('changed tests run as the candidate without a second frozen-baseline execution', async () => {
+test('workspace verification compatibility: changed tests run as the candidate', async () => {
   const options = await fixture();
   const original = "import { readFileSync } from 'node:fs';\nif (readFileSync('sample.txt', 'utf8') !== 'after\\n') process.exit(1);\n";
   await writeFile(join(options.ws.path, 'sample.test.mjs'), original);
@@ -113,7 +113,7 @@ test('changed tests run as the candidate without a second frozen-baseline execut
   });
 });
 
-test('CI Repair uses the same structured verification boundary and supports structured human help', async () => {
+test('legacy structured repair compatibility: verification boundary and human help', async () => {
   const options = await fixture();
   await withProvider([{ tool: 'mastra_workspace_edit_file', args: { path: 'sample.txt', old_string: 'before', new_string: 'after', replace_all: false } },
   { tool: 'request_repair_verification', args: {
@@ -127,7 +127,7 @@ test('CI Repair uses the same structured verification boundary and supports stru
   });
 });
 
-test('read-only Conflict filters caller-supplied mutating tools before the Agent turn', async () => {
+test('legacy Conflict compatibility: read-only mode filters caller-supplied mutating tools', async () => {
   const options = await fixture();
   const mutatingTool = createTool({ id: 'malicious_write', description: 'must never be exposed to read-only Conflict',
     inputSchema: z.object({}), execute: async () => ({ wrote: true }) });
@@ -138,7 +138,7 @@ test('read-only Conflict filters caller-supplied mutating tools before the Agent
   });
 });
 
-test('each repair rejects a clean unchanged HEAD even when a previous task already committed a repair', async () => {
+test('legacy structured repair compatibility: each repair rejects a clean unchanged HEAD', async () => {
   const options = await fixture();
   const request = { summary: 'claims repaired', tests: [nodeFileExists('sample.txt')], validation_not_applicable: null };
   await withProvider([
@@ -183,7 +183,7 @@ async function shortBudget(run: () => Promise<void>) {
   budget.maxSteps = 3; budget.feedbackTurns = 0;
   try { await run(); } finally { Object.assign(budget, previous); }
 }
-test('hard execution budget enters the same thread closeout with only submission tools and persists agent summary', async () => {
+test('legacy structured repair compatibility: hard budget enters same-thread closeout', async () => {
   await shortBudget(async () => {
     const options = await fixture();
     const read = { tool: 'mastra_workspace_read_file', args: { path: 'sample.txt' } };
@@ -208,7 +208,7 @@ test('hard execution budget enters the same thread closeout with only submission
     });
   });
 });
-test('closeout provider failure still produces mechanical evidence and a human-readable report', async () => {
+test('legacy structured repair compatibility: closeout provider failure keeps mechanical evidence', async () => {
   await shortBudget(async () => {
     const options = await fixture();
     await writeFile(join(options.ws.path, 'sample.txt'), 'candidate\n');
@@ -222,14 +222,14 @@ test('closeout provider failure still produces mechanical evidence and a human-r
     });
   });
 });
-test('human decision during closeout wins over budget exhaustion', async () => {
+test('legacy structured repair compatibility: human decision wins during closeout', async () => {
   await shortBudget(async () => {
     await withProvider([{ text: 'Unfinished' }, { tool: 'request_human_help', args: { reason: '请选择架构方向' } }], async () => {
       assert.deepEqual(await runDirectConflictRepair(await fixture(), {}), { status: 'needs_human', summary: '请选择架构方向' });
     });
   });
 });
-test('verification submitted during closeout still runs independent checks', async () => {
+test('legacy structured repair compatibility: closeout verification still runs independent checks', async () => {
   await shortBudget(async () => {
     for (const passing of [true, false]) {
       const options = await fixture();
@@ -242,64 +242,5 @@ test('verification submitted during closeout still runs independent checks', asy
         assert.equal(validation.ok, passing);
       });
     }
-  });
-});
-test('soft budget warning leaves verification available without requiring closeout', async () => {
-  const previous = budget.maxSteps; budget.maxSteps = 10;
-  try {
-    const options = await fixture(); await writeFile(join(options.ws.path, 'sample.txt'), 'candidate\n');
-    await withProvider([{ tool: 'request_repair_verification', args: { summary: 'ready', tests: [nodeExit(0)], validation_not_applicable: null } }], async requests => {
-      assert.equal((await runDirectConflictRepair(options, {})).status, 'repaired');
-      assert.match(JSON.stringify(requests[0].messages), /本轮剩余 10 个执行步骤/);
-      assert.equal(requests.length, 1);
-    });
-  } finally { budget.maxSteps = previous; }
-});
-test('the final feedback turn exhausts the total step budget before independent closeout', async () => {
-  const previous = { maxSteps: budget.maxSteps, feedbackTurns: budget.feedbackTurns };
-  budget.maxSteps = 1; budget.feedbackTurns = 1;
-  try {
-    const read = { tool: 'mastra_workspace_read_file', args: { path: 'sample.txt' } };
-    await withProvider([read, read, { tool: 'submit_task_closeout', args: closeout }], async requests => {
-      assert.equal((await runDirectConflictRepair(await fixture(), {})).status, 'budget_exhausted');
-      assert.equal(requests.length, 3);
-      assert.ok(requests[1].tools.some((t: any) => t.function.name === 'mastra_workspace_edit_file'));
-      assert.ok(!requests[2].tools.some((t: any) => t.function.name === 'mastra_workspace_edit_file'));
-    });
-  } finally { Object.assign(budget, previous); }
-});
-test('closeout cannot execute a hallucinated edit tool even when it appears in earlier history', async () => {
-  await shortBudget(async () => {
-    const options = await fixture();
-    await withProvider([{ text: 'unfinished' },
-      { tool: 'mastra_workspace_edit_file', args: { path: 'sample.txt', old_string: 'before', new_string: 'forbidden' } },
-      { tool: 'submit_task_closeout', args: closeout }], async () => {
-      assert.equal((await runDirectConflictRepair(options, {})).status, 'budget_exhausted');
-      assert.equal(await readFile(join(options.ws.path, 'sample.txt'), 'utf8'), 'before\n');
-    });
-  });
-});
-test('wall-clock execution timeout leaves closeout with a fresh independent signal', async () => {
-  await shortBudget(async () => {
-    const options = await fixture(), previous = budget.taskMs; budget.taskMs = 200;
-    try {
-      await withProvider([{ text: 'slow unfinished work', delayMs: 500 }, { tool: 'submit_task_closeout', args: closeout }], async () => {
-        assert.equal((await runDirectConflictRepair(options, {})).status, 'budget_exhausted');
-        const saved = JSON.parse(await readFile(join(options.trace.dir, 'closeout.json'), 'utf8'));
-        assert.equal(saved.source, 'agent');
-      });
-    } finally { budget.taskMs = previous; }
-  });
-});
-
-test('staged whitespace warnings do not reject passing tests or consume another model turn', async () => {
-  const options = await fixture();
-  await withProvider([{ tool: 'request_repair_verification', args: {
-    summary: 'claims ready', tests: [nodeWriteFile('sample.txt', 'after  \n') + ' && git add sample.txt'], validation_not_applicable: null,
-  } }], async requests => {
-    const result = await runDirectConflictRepair(options, { task: 'fixture' });
-    assert.equal(result.status, 'repaired');
-    assert.equal(requests.length, 1);
-    assert.match(JSON.stringify(result), /trailing whitespace/);
   });
 });
