@@ -86,6 +86,21 @@ test('resolver fails closed for missing roles and disabled providers without exp
   } finally { closeControlPlaneDb(db); await rm(root, { recursive: true, force: true }); }
 });
 
+test('fresh CI and conflict snapshots bind only the shared opaque lifecycle', async () => {
+  const { root, db, repository } = await isolatedControlPlane();
+  try {
+    const ci = await resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/ci', executionId: 'exec-ci-fresh' });
+    assert.equal(ci.outputContract.kind, 'none');
+    assert.deepEqual(ci.snapshot.composition.parts.map(part => part.role), ['ci-repair', null, 'shared', 'repair-closeout', 'stop-closeout']);
+    assert.equal(ci.snapshot.composition.parts.some(part => ['repair-completion', 'repair-feedback', 'repair-no-verification', 'repair-verification-empty', 'review-json-retry'].includes(part.role ?? '')), false);
+
+    const conflict = await resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/conflict', executionId: 'exec-conflict-fresh' });
+    assert.equal(conflict.outputContract.kind, 'none');
+    assert.deepEqual(conflict.snapshot.composition.parts.map(part => part.role), ['conflict', null, 'shared', 'repair-closeout', 'stop-closeout', 'plan-mode']);
+    assert.equal(conflict.snapshot.composition.parts.some(part => ['repair-completion', 'repair-feedback', 'repair-no-verification', 'repair-verification-empty', 'review-json-retry'].includes(part.role ?? '')), false);
+  } finally { closeControlPlaneDb(db); await rm(root, { recursive: true, force: true }); }
+});
+
 test('legacy pre-opaque review snapshots keep strict_json only through explicit compatibility', async () => {
   const { root, db, repository } = await isolatedControlPlane();
   try {
