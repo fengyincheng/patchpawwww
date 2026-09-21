@@ -14,8 +14,10 @@ test('required operation assets load and compose shared repair behavior', () => 
   assert.equal(conflictPrompt.includes('未合并索引'), true);
   assert.equal(conflictPrompt.includes('submit_conflict_proposal'), false);
   assert.equal(conflictPrompt.includes('自然语言 / Markdown'), true);
+  assert.equal(conflictPrompt.includes('Harness 会负责 workspace、commit、push 和远端事实'), true);
   assert.equal(ciRepairPrompt.includes('read_ci_evidence'), true);
   assert.equal(ciRepairPrompt.includes('request_repair_verification'), false);
+  assert.equal(ciRepairPrompt.includes('没有固定的测试清单字段'), true);
   assert.equal(reviewPrompt.includes('只读 /review 任务'), true);
   assert.equal(reviewPrompt.includes('只返回 JSON'), false);
   assert.equal(reviewPrompt.includes('ReviewResult'), false);
@@ -23,6 +25,10 @@ test('required operation assets load and compose shared repair behavior', () => 
   assert.equal(reviewPrompt.includes('自然语言 / Markdown'), true);
   assert.equal(conversationPrompt.includes('reply_to_pr'), true);
   assert.equal(conversationPrompt.includes('不要启动修复或评审'), true);
+  assert.equal(loadOperation('repair-completion').includes('request_repair_verification'), false);
+  assert.equal(loadOperation('repair-completion').includes('validation_not_applicable'), false);
+  assert.equal(loadOperation('repair-closeout').includes('request_repair_verification'), false);
+  assert.equal(loadOperation('runtime-budget').includes('request_repair_verification'), false);
   const conflictPlan = composeOperations('conflict', 'plan-mode');
   assert.equal(conflictPlan.includes('只读分析并返回自然语言 / Markdown 计划'), true);
   assert.equal(conflictPlan.includes('不要返回 JSON'), true);

@@ -1,1 +1,1 @@
-常规修复执行预算已耗尽。在同一线程中进入 closeout 模式。不要编辑，也不要运行命令。你最多有 {{closeoutSteps}} 个模型步骤。提交 submit_task_closeout，写明确切已完成/剩余的工作、最后一次进行的调查、验证与发布状态。如果下一个决策属于人类，使用 request_human_help。如果已就绪，请求 request_repair_verification；成功与否仍由 Harness 判定。最后的验证问题：{{lastIssue}}
+常规修复执行预算已耗尽。在同一线程中进入 closeout 模式。不要编辑，也不要运行命令。你最多有 {{closeoutSteps}} 个模型步骤。提交 submit_task_closeout，写明确切已完成/剩余的工作、最后一次进行的调查、验证与发布状态。如果下一个决策属于人类，使用 request_human_help。最终回复使用自然语言；Harness 会判定 workspace 与写回事实。最后的问题：{{lastIssue}}
