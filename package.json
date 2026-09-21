@@ -18,6 +18,7 @@
     "backup-runtime": "node --import tsx scripts/backup-runtime.ts",
     "restore-runtime": "node --import tsx scripts/restore-runtime.ts",
     "bootstrap:control-plane": "node --import tsx scripts/bootstrap-control-plane.ts",
+    "migrate:builtin-assets": "node --import tsx scripts/migrate-builtin-assets.ts",
     "sync:operation": "node --import tsx scripts/sync-operation-prompts.ts",
     "generate:admin-token": "node --import tsx scripts/generate-admin-token.ts",
     "agent:open": "node --import tsx scripts/agent-open.ts",

@@ -60,6 +60,7 @@ import {
   type ScmConnectionInput,
 } from '../control-plane/index.ts';
 import { normalizeRepositoryName } from '../control-plane/common.ts';
+import { builtinPromptBySlug } from '../control-plane/builtin-prompts.ts';
 import type { GitHubReader } from '../github/client.ts';
 import { normalizeOrigin } from './public-setup.ts';
 import { SecretStore } from '../control-plane/secrets.ts';
@@ -127,6 +128,11 @@ export interface AdminPromptDto {
   source_public_id: string | null;
   source_public_revision: number | null;
   source_status: 'active' | 'deleted' | null;
+  builtin_key: string | null;
+  builtin_category: string | null;
+  identity_locked: boolean;
+  content_editable: boolean;
+  new_runs: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -454,9 +460,13 @@ async function skillSourceStatus(db: ControlPlaneDb, asset: SkillAsset) {
 }
 
 async function promptDto(db: ControlPlaneDb, asset: PromptAsset): Promise<AdminPromptDto> {
+  const definition = builtinPromptBySlug(asset.slug);
   return { id: asset.id, scope: asset.scope, repository_id: asset.repositoryId, slug: asset.slug, title: asset.title, role: asset.role,
     content: asset.content, enabled: asset.enabled, revision: asset.revision, source_public_id: asset.sourcePublicId,
-    source_public_revision: asset.sourcePublicRevision, source_status: await promptSourceStatus(db, asset), created_at: asset.createdAt, updated_at: asset.updatedAt };
+    source_public_revision: asset.sourcePublicRevision, source_status: await promptSourceStatus(db, asset),
+    builtin_key: definition?.key ?? null, builtin_category: definition?.category ?? null,
+    identity_locked: definition?.identityLocked ?? false, content_editable: definition?.contentEditable ?? true,
+    new_runs: definition?.newRuns ?? true, created_at: asset.createdAt, updated_at: asset.updatedAt };
 }
 
 async function skillDto(db: ControlPlaneDb, asset: SkillAsset): Promise<AdminSkillDto> {

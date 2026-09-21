@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { withFileLock } from '../platform/lock.ts';
 import { patchpawPaths } from '../config/paths.ts';
-import { loadOperation } from '../operation/load.ts';
+import { loadOperationSource } from '../operation/load.ts';
 import { openControlPlaneDb, isoNow, type ControlPlaneDb, type ControlPlaneTransaction } from './db.ts';
 import { CONTROL_PLANE_MIGRATION_VERSION } from './schema.ts';
 import { ControlPlaneError } from './errors.ts';
@@ -25,12 +25,8 @@ interface SourceSkill { slug: string; title: string; description: string; conten
 async function sourcePrompts(root: string) {
   const result: SourcePrompt[] = [];
   for (const definition of publicBuiltinPrompts()) {
-    const slug = normalizeAssetSlug(definition.slug);
-    const sourceFile = definition.source.replace(/^operation\//, '');
-    const content = root === defaultOperationRoot
-      ? loadOperation(sourceFile.slice(0, -3))
-      : (await readFile(join(root, sourceFile), 'utf8')).replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
-    result.push({ slug, title: slug, role: definition.role, content, digest: contentDigest(content) });
+    const content = loadOperationSource(definition.source, root);
+    result.push({ slug: definition.slug, title: definition.slug, role: definition.role, content, digest: contentDigest(content) });
   }
   return result;
 }

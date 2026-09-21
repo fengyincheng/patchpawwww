@@ -50,6 +50,11 @@ export interface PromptAsset {
   source_public_id: string | null;
   source_public_revision: number | null;
   source_status: 'active' | 'deleted' | null;
+  builtin_key: string | null;
+  builtin_category: string | null;
+  identity_locked: boolean;
+  content_editable: boolean;
+  new_runs: boolean;
   created_at: string;
   updated_at: string;
 }

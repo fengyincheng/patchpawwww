@@ -3,6 +3,7 @@ import { ControlPlaneDb, booleanValue, isoNow, numberValue, optionalNumberValue,
 import { assertExpectedRevision, ControlPlaneError, isSqliteConstraint, notFound, rethrowConstraint } from './errors.ts';
 import { bumpRepository, contentDigest, createId, findMarker, normalizeAssetSlug, normalizeRole, normalizedContent, putMarker } from './common.ts';
 import { requireRepository } from './repositories.ts';
+import { builtinPromptByRole, builtinPromptBySlug } from './builtin-prompts.ts';
 import type { CopyOptions, ExpectedRevision, PromptAsset, PromptInput } from './types.ts';
 
 export function promptFromRow(row: Row): PromptAsset {
@@ -49,6 +50,7 @@ export async function createPrompt(db: ControlPlaneDb, input: PromptInput) {
   assertScope(input);
   const slug = normalizeAssetSlug(input.slug);
   const role = normalizeRole(input.role);
+  assertBuiltinIdentityIngress(slug, role);
   const content = normalizedContent(input.content);
   if (input.scope === 'repository') await requireRepository(db, input.repositoryId!);
   const now = isoNow();
@@ -87,16 +89,42 @@ async function assertPromptIsNotBound(transaction: ControlPlaneTransaction, id: 
   if (count > 0) throw new ControlPlaneError(requiredCode, `Prompt asset is still bound: ${id}`);
 }
 
+function assertBuiltinIdentityLocked(current: PromptAsset, patch: Partial<Pick<PromptInput, 'slug' | 'role'>>) {
+  const definition = builtinPromptBySlug(current.slug);
+  if (!definition?.identityLocked) return;
+  if (patch.slug !== undefined && normalizeAssetSlug(patch.slug) !== definition.slug) {
+    throw new ControlPlaneError('invalid_configuration', `Builtin Prompt identity is locked: ${definition.slug}`, 'slug');
+  }
+  if (patch.role !== undefined && normalizeRole(patch.role) !== definition.role) {
+    throw new ControlPlaneError('invalid_configuration', `Builtin Prompt identity is locked: ${definition.slug}`, 'role');
+  }
+}
+
+function assertBuiltinIdentityIngress(slug: string, role: string | null) {
+  const reservedSlug = builtinPromptBySlug(slug);
+  if (reservedSlug?.identityLocked && role !== reservedSlug.role) {
+    throw new ControlPlaneError('invalid_configuration',
+      `Reserved builtin Prompt slug "${slug}" requires role "${reservedSlug.role}".`, 'role');
+  }
+  const reservedRole = builtinPromptByRole(role);
+  if (reservedRole?.identityLocked && slug !== reservedRole.slug) {
+    throw new ControlPlaneError('invalid_configuration',
+      `Reserved builtin Prompt role "${role}" requires slug "${reservedRole.slug}".`, 'slug');
+  }
+}
+
 export async function updatePrompt(db: ControlPlaneDb, id: string, patch: Partial<Pick<PromptInput, 'slug' | 'title' | 'role' | 'content' | 'enabled'>> = {}, options: ExpectedRevision = {}) {
   return db.transaction(async transaction => {
     const currentRow = await transaction.execute('SELECT * FROM prompt_assets WHERE id = :id', { id });
     if (!currentRow.rows[0]) notFound('Prompt asset', id);
     const current = promptFromRow(currentRow.rows[0]);
     assertExpectedRevision(current.revision, options.expectedRevision, 'Prompt asset');
-    const enabled = patch.enabled ?? current.enabled;
-    if (current.enabled && !enabled) await assertPromptIsNotBound(transaction, id, 'required_binding');
     const slug = patch.slug === undefined ? current.slug : normalizeAssetSlug(patch.slug);
     const role = patch.role === undefined ? current.role : normalizeRole(patch.role);
+    assertBuiltinIdentityLocked(current, patch);
+    assertBuiltinIdentityIngress(slug, role);
+    const enabled = patch.enabled ?? current.enabled;
+    if (current.enabled && !enabled) await assertPromptIsNotBound(transaction, id, 'required_binding');
     const content = patch.content === undefined ? current.content : normalizedContent(patch.content);
     const updatedAt = isoNow();
     try {
