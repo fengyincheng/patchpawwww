@@ -103,8 +103,12 @@ test('runner verifies and pushes an Agent-authored commit without making a dupli
   assert.equal((await git(join(f.root, 'remote'), ['log', '-1', '--format=%s', 'feature'])).stdout.trim(), 'Agent authored fix');
   assert.equal((await git(join(f.root, 'remote'), ['rev-list', '--count', `${f.base}..feature`])).stdout.trim(), '1');
   assert.equal((await git(join(f.root, 'remote'), ['rev-parse', 'feature'])).stdout.trim(), result.final_head_sha);
+  const durable = await readState(statePath(join(f.root, 'data/state'), 'owner/lab', 7));
+  assert.equal(durable?.phase, 'ci_completed');
+  assert.equal(durable?.current_head_sha, result.final_head_sha);
+  assert.equal(durable?.last_patchpaw_commit, result.final_head_sha);
+  assert.equal(f.modelInputs.some(input => input.tools.some((tool: any) => tool.function.name === 'request_repair_verification')), false);
   const events = (await readFile(join(dir, 'trace.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.ok(events.some(e => e.event === 'repair_verification' && e.ok));
   assert.equal(events.filter(e => e.event === 'git' && e.args[0] === 'commit').length, 0);
   assert.ok(events.some(e => e.event === 'workspace_disposed' && e.workspace === workspace));
   await assert.rejects(stat(workspace), { code: 'ENOENT' }, 'terminal workspace is disposed while run evidence remains');

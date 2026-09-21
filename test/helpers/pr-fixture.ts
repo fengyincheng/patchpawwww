@@ -9,13 +9,19 @@ import { statePath } from '../../src/runner/state.ts';
 import { budget } from '../../src/harness/budget.ts';
 import { nodeFileExists, nodeWriteFile } from './portable-commands.ts';
 
+export type FixtureMode = 'fresh' | 'legacy';
+type ModelReply = { tool: string; args: Record<string, unknown> } | { text: string };
+
 // Shared in-process fixture: real temporary Git repos + durable state layout, mocked GitHub and
 // model transports. Extracted verbatim from the comment-loop suite so lifecycle tests exercise
 // the same battle-tested environment; `holdModel` is the only addition (a test-controlled stall
 // inside the model handler, used to observe an active task from the outside).
-export async function fixture(t: TestContext, initialMention = true) {
+export async function fixture(t: TestContext, initialMention = true, mode: FixtureMode = 'fresh') {
   const root = await mkdtemp(join(tmpdir(), 'patchpaw-comment-loop-'));
   const remote = join(root, 'remote'); await mkdir(remote);
+  const cloneUrl = 'https://github.com/owner/lab.git';
+  const gitConfig = join(root, 'gitconfig');
+  await writeFile(gitConfig, `[url "file://${remote}"]\n\tinsteadOf = ${cloneUrl}\n`);
   await git(remote, ['init', '-b', 'main']);
   await git(remote, ['config', 'user.name', 'Fixture']);
   await git(remote, ['config', 'user.email', 'fixture@localhost']);
@@ -26,18 +32,20 @@ export async function fixture(t: TestContext, initialMention = true) {
   const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const config = { root, appId: 42, appSlug: 'patchpawwww', botLogin: 'patchpawwww[bot]', wakeTransport: 'memory' as const,
     privateKey: keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), snapshotRoot: join(root, 'snapshots'), operatorLogin: 'operator' };
-  const previousEnv = { key: process.env.ZAI_API_KEY, url: process.env.ZAI_BASE_URL };
+  const previousEnv = { key: process.env.ZAI_API_KEY, url: process.env.ZAI_BASE_URL, gitConfig: process.env.GIT_CONFIG_SYSTEM };
+  process.env.GIT_CONFIG_SYSTEM = gitConfig;
   const poll = budget.ciPollMs;
   process.env.ZAI_API_KEY = 'fixture-secret'; process.env.ZAI_BASE_URL = 'https://model.fixture/v1'; budget.ciPollMs = 1;
   t.after(() => {
     budget.ciPollMs = poll;
-    for (const [name, value] of [['ZAI_API_KEY', previousEnv.key], ['ZAI_BASE_URL', previousEnv.url]]) {
+    for (const [name, value] of [['ZAI_API_KEY', previousEnv.key], ['ZAI_BASE_URL', previousEnv.url], ['GIT_CONFIG_SYSTEM', previousEnv.gitConfig]]) {
       if (value === undefined) delete process.env[name!]; else process.env[name!] = value;
     }
   });
   const calls: { path: string; body: any }[] = [], modelInputs: any[] = [];
-  const control = { commentStatus: 201, commentStatusSequence: undefined as number[] | undefined, installationFailures: 0, turn: 0, captureFails: false, prAuthor: 'owner', conversation: 'continue', conversationReadsCurrentBase: false, agentCommits: false,
+  const control = { mode, commentStatus: 201, commentStatusSequence: undefined as number[] | undefined, installationFailures: 0, turn: 0, captureFails: false, prAuthor: 'owner', conversation: 'continue', conversationReadsCurrentBase: false, agentCommits: false,
     dropReviewAcknowledgement: false, reviewNeedsHelp: false, redAlways: false, repeatRepair: false,
+    freshRepairToolPending: false,
     stopOnPublish: false, stopOnPoll: false, stopOnModel: false, stopReportFails: false, conflictRepair: false, approvalRepair: false, conflictRevision: false, humanConflict: false, pauseConflict: false, closeoutFails: false, mainSha: undefined as string | undefined, prHeadRepo: 'owner/lab' as string | null,
     holdModel: undefined as undefined | (() => Promise<void>) };
   const publishedReviews: any[] = [];
@@ -64,16 +72,27 @@ export async function fixture(t: TestContext, initialMention = true) {
       modelInputs.push(body);
       const stopping = body.tools.length === 1 && body.tools[0].function.name === 'submit_stop_report';
       if (stopping && control.stopReportFails) return json({ error: { message: 'stop report fixture unavailable' } }, 400);
-      const responses = [
+      const freshResponses: ModelReply[] = [
         { tool: 'request_human_help', args: { reason: '测试需要产品决策：保留哪种行为？ evidence: sample.txt; fixture-secret' } },
         { tool: 'mastra_workspace_edit_file', args: { path: 'sample.txt', old_string: 'before', new_string: 'after' } },
         ...(control.agentCommits ? [{ tool: 'mastra_workspace_execute_command', args: { command: 'git add sample.txt && git commit -m "Agent authored fix"' } }] : []),
+        { text: '修复完成：已完成候选修改，并由 Harness 继续确认工作区、提交与远端状态。' },
+      ];
+      const legacyResponses: ModelReply[] = [
+        freshResponses[0], freshResponses[1],
+        ...(control.agentCommits ? [freshResponses[2]] : []),
         { tool: 'request_repair_verification', args: { summary: 'Applied human choice', tests: [nodeFileExists('sample.txt')], validation_not_applicable: null } },
       ];
+      const responses = mode === 'legacy' ? legacyResponses : freshResponses;
       const conversation = body.tools.some((tool: any) => tool.function.name === 'reply_to_pr');
-      const isConflict = body.tools.some((tool: any) => tool.function.name === 'submit_conflict_proposal');
-      const isCustom = body.messages.some((message: any) => String(message.content ?? '').includes('CUSTOM_TASK_MARKER'));
-      const isReview = !isCustom && !conversation && !isConflict && !body.tools.some((tool: any) => tool.function.name === 'request_repair_verification');
+      const promptText = body.messages.map((message: any) => String(message.content ?? '')).join('\n');
+      const isConflict = mode === 'legacy'
+        ? body.tools.some((tool: any) => tool.function.name === 'submit_conflict_proposal')
+        : /## Prompt conflict\b/.test(promptText);
+      const isCustom = promptText.includes('CUSTOM_TASK_MARKER');
+      const isReview = mode === 'legacy'
+        ? !isCustom && !conversation && !isConflict && !body.tools.some((tool: any) => tool.function.name === 'request_repair_verification')
+        : /## Prompt review\b/.test(promptText);
       const conversationHasCurrentBaseEvidence = body.messages.some((message: any) => message.role === 'tool' && String(message.content ?? '').includes('current_base_tip'));
       const step = control.turn;
       const closing = body.tools.every((tool: any) => ['request_human_help', 'request_repair_verification', 'submit_task_closeout'].includes(tool.function.name));
@@ -89,6 +108,8 @@ export async function fixture(t: TestContext, initialMention = true) {
         risks_or_open_questions: ['需要确认双方行为的优先级。'], human_markdown_summary: '这是一个只读提案，等待明确 /approval。' } };
       const approvalRepair = control.approvalRepair;
       if (approvalRepair) control.approvalRepair = false;
+      let naturalText: string | undefined;
+      const freshWrite = { tool: 'mastra_workspace_execute_command', args: { command: nodeWriteFile('sample.txt', 'resolved\n') + ' && git add sample.txt' } };
       const reply = stopping ? { tool: 'submit_stop_report', args: { summary: '收到停止请求。当前正在调查架构选择，工作区已保留，等待你的意见。' } } : isCustom
         ? undefined : isConflict && control.humanConflict
         ? responses[0]
@@ -99,10 +120,23 @@ export async function fixture(t: TestContext, initialMention = true) {
         : isReview ? (control.reviewNeedsHelp ? { tool: 'request_human_help', args: { reason: '还没有改代码，我现在就想请人确认需求。' } } : undefined)
         : conversation && control.conversationReadsCurrentBase && !conversationHasCurrentBaseEvidence
         ? { tool: 'read_current_base_file', args: { path: 'current-base-only.txt' } }
-        : conversation && isConflict && control.conflictRevision ? (control.turn++, conflict)
+        : conversation && isConflict && mode === 'legacy' && control.conflictRevision ? (control.turn++, conflict)
         : conversation ? { tool: 'reply_to_pr', args: { body: '可以正常沟通。这条消息只需要回答，不需要修改代码。' } }
-        : approvalRepair ? (control.turn = responses.length - 1, { tool: 'mastra_workspace_execute_command', args: { command: nodeWriteFile('sample.txt', 'resolved\n') + ' && git add sample.txt' } })
-        : control.conflictRepair ? (control.turn++, conflict) : control.repeatRepair ? (control.turn++, repeated) : responses[control.turn++];
+        : approvalRepair ? (control.turn = responses.length - 1, control.conflictRepair = false, freshWrite)
+        : control.conflictRepair ? (mode === 'legacy'
+          ? (control.turn++, conflict)
+          : body.tools.some((tool: any) => /mastra_workspace_(edit_file|write_file|execute_command)/.test(tool.function.name))
+            ? (control.turn = responses.length - 1, control.conflictRepair = false, freshWrite)
+            : (naturalText = '冲突分析计划：已检查未合并索引、PR 意图与当前 base，等待 Harness 的审批阶段。', undefined))
+        : mode === 'fresh' && control.repeatRepair
+        ? control.freshRepairToolPending
+          ? (control.freshRepairToolPending = false, naturalText = '修复完成：已完成本轮候选修改，并返回自然语言结果。', undefined)
+          : (control.freshRepairToolPending = true, control.turn++, { tool: 'mastra_workspace_execute_command', args: { command: nodeWriteFile('sample.txt', `repair-${control.turn}\n`) } })
+        : control.repeatRepair ? (control.turn++, repeated) : responses[control.turn++];
+      if (isReview && !reply) naturalText = '评审完成：未发现需要立即处理的问题；局限性已在报告中说明。';
+      if (isCustom && !reply) naturalText = 'CUSTOM_NATURAL_LANGUAGE_ANSWER';
+      if (reply && 'text' in reply && !naturalText) naturalText = reply.text;
+      const toolReply = reply && 'tool' in reply ? reply : undefined;
       // Stall only AFTER the reply is computed: the aborted request's turn increment must
       // be synchronous, so a discarded in-flight response can never mutate shared fixture
       // state late and poison the deterministic sequence of a later run.
@@ -112,9 +146,9 @@ export async function fixture(t: TestContext, initialMention = true) {
       }
       if (!stopping && control.holdModel) await control.holdModel();
       return json({ id: `response-${control.turn}`, model: 'fixture', choices: [{ index: 0,
-        message: { role: 'assistant', content: isCustom ? 'CUSTOM_NATURAL_LANGUAGE_ANSWER' : reply ? '' : JSON.stringify({ summary: 'Human choice verified', recommendation: 'approve', findings: [], limitations: [] }),
-          ...(reply ? { tool_calls: [{ id: `call-${modelInputs.length}`, type: 'function', function: { name: reply.tool, arguments: JSON.stringify(reply.args) } }] } : {}) },
-        finish_reason: isCustom ? 'stop' : reply ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+        message: { role: 'assistant', content: naturalText ?? (toolReply ? '' : mode === 'legacy' ? JSON.stringify({ summary: 'Human choice verified', recommendation: 'approve', findings: [], limitations: [] }) : '任务完成：已检查当前证据并返回自然语言结果。'),
+          ...(toolReply ? { tool_calls: [{ id: `call-${modelInputs.length}`, type: 'function', function: { name: toolReply.tool, arguments: JSON.stringify(toolReply.args) } }] } : {}) },
+        finish_reason: isCustom ? 'stop' : toolReply ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
     }
     calls.push({ path, body });
     if (control.stopOnPoll && path.endsWith('/check-runs')) { control.stopOnPoll = false; await requestStop(); }
@@ -127,9 +161,9 @@ export async function fixture(t: TestContext, initialMention = true) {
     if (path === '/app/installations/42/access_tokens') return json({ token: 'ghs_fixture_token', expires_at: '2099-01-01T00:00:00Z' }, 201);
     const head = (await git(remote, ['rev-parse', 'feature'])).stdout.trim();
     if (path === '/repos/owner/lab') return control.captureFails ? json({ message: 'Fixture inspection failure' }, 403)
-      : json({ id: 10, full_name: 'owner/lab', private: true, clone_url: remote });
+      : json({ id: 10, full_name: 'owner/lab', private: true, clone_url: cloneUrl });
     if (path === '/repos/owner/lab/pulls/7') return json({ number: 7, state: 'open', title: 'Fixture', body: '', user: { login: control.prAuthor },
-      html_url: 'https://github.com/owner/lab/pull/7', base: { ref: 'main', sha: control.mainSha ?? base, repo: { id: 10 } }, head: { sha: head, ref: 'feature', repo: control.prHeadRepo ? { full_name: control.prHeadRepo } : null } });
+      html_url: 'https://github.com/owner/lab/pull/7', base: { ref: 'main', sha: control.mainSha ?? base, repo: { id: 10 } }, head: { sha: head, ref: 'feature', repo: control.prHeadRepo ? { id: control.prHeadRepo === 'owner/lab' ? 10 : 11, full_name: control.prHeadRepo, clone_url: cloneUrl } : null } });
     if (path === '/repos/owner/lab/branches/main') return json({ commit: { sha: control.mainSha ?? base } });
     if (path.endsWith('/check-runs')) return json({ total_count: 1, check_runs: [{ name: 'unit', status: 'completed', conclusion: control.redAlways || head === base ? 'failure' : 'success', html_url: 'https://github.com/owner/lab/actions/runs/9' }] });
     if (path.endsWith('/status')) return json({ state: 'pending', statuses: [] });
