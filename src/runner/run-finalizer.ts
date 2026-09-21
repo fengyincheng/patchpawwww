@@ -30,6 +30,7 @@ export interface RunFinalizerInput {
   root: string;
   repo: string;
   prNumber: number;
+  projectId: string;
   runId: string;
   executionId: number;
   statePath: string;
@@ -90,7 +91,7 @@ export async function finishRun(input: RunFinalizerInput, status: string, extra:
       reason: `${status === 'harness_failed' && !failure ? 'Harness 执行／验证过程出错，不等同于代码测试失败。\n' : ''}${status === 'model_output_truncated' && !failure ? '模型连接正常，但单次输出上限已耗尽，未生成完整评审结果；这不是 Provider 不可用，也没有生成可发布的代码验收记录。\n' : ''}${input.workspaceNotice}${extra.reason ?? extra.message ?? '本次任务尚未完成。'}\n${state.last_patchpaw_commit ? `本次记录的 PatchPaw 提交：\`${state.last_patchpaw_commit}\`。\n` : '本次没有记录 PatchPaw 提交或推送；失败不代表代码已交付。\n'}\n${evidence}`,
       mentions: input.recipients(), bot_login: input.botLogin }));
     trace.save('run-notice.json', notice);
-    await publishRunNotice({ root: input.root, repo: input.repo, prNumber: input.prNumber, trace, notice,
+    await publishRunNotice({ root: input.root, repo: input.repo, prNumber: input.prNumber, projectId: input.projectId, trace, notice,
       botLogin: input.botLogin || undefined, adapter: input.scm });
   }
   if (genericApprovalClaim) await input.settleGenericApprovalClaim(status.endsWith('_completed') ? 'completed' : 'interrupted');

@@ -67,7 +67,7 @@ export async function publishApprovalPlan(input: ApprovalPlanPublicationInput): 
   const publicationBody = body + '\n\n---\n此计划为只读阶段产物。确认当前计划后，请在此 PR 单独发送：' + tick + '/approval' + tick;
   const stored = await enqueueCommentDelivery({ root, repo, prNumber, purpose: 'approval_plan',
     semanticKey: approvalPlanDeliverySemanticKey(plan), body: publicationBody, mentions, botLogin,
-    source: { run_id: runId, execution_id: executionId, plan_id: plan.plan_id, plan_revision: plan.plan_revision,
+    source: { project_id: projectId, run_id: runId, execution_id: executionId, plan_id: plan.plan_id, plan_revision: plan.plan_revision,
       body_sha256: plan.body_sha256, command_snapshot_id: plan.command_snapshot_id, command_snapshot_sha256: plan.command_snapshot_sha256 } });
   await updateApprovalPlan(path, plan.plan_revision, { status: 'publication_pending' });
   await retainWorkspace(path, trace, { run_id: runId, execution_id: executionId, task, workspace,

@@ -200,7 +200,7 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
   const phase = async (raw: string) => { const value = assertRunPhase(raw); applyRunPhase(state, value);
     await writeState(path, state); trace.emit('phase', { phase: value }); console.log(JSON.stringify({ run_id: runId, phase: value })); };
   const finish = (status: string, extra: { reason?: string; message?: string; [key: string]: unknown } = {}, persistedPhase = status) => finishRun({
-    root: config.root, repo, prNumber: number, runId, executionId, statePath: path, state, trace, scm: requireScm(), botLogin, activeTask, approvedConflictRepair,
+    root: config.root, repo, prNumber: number, projectId, runId, executionId, statePath: path, state, trace, scm: requireScm(), botLogin, activeTask, approvedConflictRepair,
     activeWorkspace, changeRequest, confirmedRemoteHead, stop, workspaceNotice, recipients,
     genericApprovalClaim: genericApprovalClaim ? approvalPlanBinding(genericApprovalClaim) : undefined, phase, settleGenericApprovalClaim,
   }, status, extra, persistedPhase);
@@ -438,7 +438,7 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
     settleGenericApprovalClaim = phase => settleApprovalPlanClaim({ path, trace, claim: genericApprovalClaim, phase });
     const deliver = (status: 'custom_completed' | 'conflict_completed' | 'ci_completed' | 'repair_completed', body: string) => publishTaskWithLifecycle({
       root: config.root, repo, prNumber: number, runId, path, workspacePath: ws.path, status, body, workspaceNotice,
-      headSha: state.current_head_sha, mentions: recipients(), botLogin, adapter, trace,
+      headSha: state.current_head_sha, projectId, mentions: recipients(), botLogin, adapter, trace,
       approvalPlan: genericApprovalClaim ? approvalPlanBinding(genericApprovalClaim) : undefined, guard: () => requireStop().guard(), finish,
     });
     const publishApprovalPlan = async (body: string) => publishApprovalPlanDomain({

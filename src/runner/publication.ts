@@ -28,6 +28,7 @@ export interface TaskPublicationInput {
   body: string;
   workspaceNotice?: string;
   headSha: string;
+  projectId: string;
   mentions: string[];
   botLogin: string;
   adapter: ScmAdapter;
@@ -67,7 +68,7 @@ export async function publishTaskAnswer(input: TaskPublicationInput) {
     body: answer,
     mentions: input.mentions,
     botLogin: input.botLogin,
-    source: input.source ?? { run_id: input.runId, status: input.status },
+    source: input.source ?? { project_id: input.projectId, run_id: input.runId, status: input.status },
   }, { adapter: input.adapter, botLogin: input.botLogin })).publication;
   input.trace.save('delivery-publication.json', publication);
   await input.guard?.();
@@ -78,6 +79,7 @@ export interface RunNoticePublicationInput {
   root: string;
   repo: string;
   prNumber: number;
+  projectId: string;
   trace: Trace;
   notice: RunNotice;
   botLogin?: string;
@@ -113,7 +115,7 @@ export async function publishRunNotice(input: RunNoticePublicationInput) {
       botLogin: input.botLogin,
       legacyMarkers: ['budget_exhausted', 'stopped'].includes(input.notice.status)
         ? [closeoutMarker(input.notice.run_id)] : undefined,
-      source: { run_id: input.notice.run_id, status: input.notice.status },
+      source: { project_id: input.projectId, run_id: input.notice.run_id, status: input.notice.status },
     });
     let publication: TaskPublication;
     try {

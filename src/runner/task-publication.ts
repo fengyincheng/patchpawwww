@@ -17,6 +17,7 @@ export interface TaskPublicationInputWithLifecycle {
   body: string;
   workspaceNotice: string;
   headSha: string;
+  projectId: string;
   mentions: string[];
   botLogin: string;
   adapter: ScmAdapter;
@@ -32,9 +33,9 @@ export async function publishTaskWithLifecycle(input: TaskPublicationInputWithLi
   if (paused?.workspace.path === input.workspacePath) await savePaused(input.path, { ...paused, status: 'completed' });
   const published = await publishTaskAnswer({
     root: input.root, repo: input.repo, prNumber: input.prNumber, runId: input.runId, status: input.status,
-    body: input.body, workspaceNotice: input.workspaceNotice, headSha: input.headSha, mentions: input.mentions,
+    body: input.body, workspaceNotice: input.workspaceNotice, headSha: input.headSha, projectId: input.projectId, mentions: input.mentions,
     botLogin: input.botLogin, adapter: input.adapter, trace: input.trace,
-    source: { run_id: input.runId, status: input.status }, approvalPlan: input.approvalPlan,
+    source: { project_id: input.projectId, run_id: input.runId, status: input.status }, approvalPlan: input.approvalPlan,
     guard: input.guard,
   });
   return input.finish(input.status, published);
