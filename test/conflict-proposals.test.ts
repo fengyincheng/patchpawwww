@@ -10,7 +10,15 @@ import { readState, statePath } from '../src/runner/state.ts';
 import { saveHumanReply } from '../src/runner/human-feedback.ts';
 import { attemptDelivery, listOutbound } from '../src/runner/outbound.ts';
 import { finalizeDelayedDelivery } from '../src/runner/communication-scheduler.ts';
-import { readCurrentApprovalPlan } from '../src/runner/approval-plans.ts';
+import {
+  createApprovalPlan,
+  readApprovalPlan,
+  readApprovalPlanClaim,
+  readCurrentApprovalPlan,
+  readUnfinishedApprovalPlanClaim,
+  saveApprovalPlan,
+  updateApprovalPlan,
+} from '../src/runner/approval-plans.ts';
 import { conflictProposalHash, createConflictProposal, validateConflictProposal } from '../src/runner/conflict-proposals.ts';
 import { createGitHub } from '../src/github/client.ts';
 
@@ -108,6 +116,28 @@ test('generic Approval Plan publication retry finalizes the same receipt without
   assert.equal((await readState(path))?.phase, 'awaiting_approval');
   assert.equal((await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 }))
     .find(value => value.item.delivery_id === pending!.item.delivery_id)?.item.lifecycle_status, 'finalized');
+});
+
+test('generic Approval Plan never reuses a superseded revision claim for the new revision', async t => {
+  const { path } = await publishedPlan(t);
+  const current = (await readCurrentApprovalPlan(path))!;
+  const acceptedAt = new Date().toISOString();
+  await updateApprovalPlan(path, current.plan.plan_revision, {
+    status: 'approved',
+    approval: { plan_id: current.plan.plan_id, plan_revision: current.plan.plan_revision, body_sha256: current.plan.body_sha256,
+      source_event_id: 'old-approval-event', source_comment_id: 800, author: 'operator', author_association: 'OWNER',
+      accepted_at: acceptedAt, claim_run_id: 'old-approval-run', phase: 'running', updated_at: acceptedAt },
+  });
+  const { publication: _publication, status: _status, body_sha256: _bodyHash, schema_version: _schema, ...immutable } = current.plan;
+  const replacement = createApprovalPlan({ ...immutable, plan_revision: current.plan.plan_revision + 1,
+    run_id: 'replacement-run', execution_id: current.plan.execution_id + 1, body: '新的自然语言计划。', status: 'published' });
+  await updateApprovalPlan(path, current.plan.plan_revision, { status: 'superseded' });
+  await saveApprovalPlan(path, replacement);
+
+  assert.equal((await readApprovalPlan(path, current.plan.plan_revision))?.status, 'superseded');
+  assert.equal((await readApprovalPlanClaim(path, current.plan.plan_revision))?.plan_revision, current.plan.plan_revision);
+  assert.equal((await readCurrentApprovalPlan(path))?.plan.plan_revision, replacement.plan_revision);
+  assert.equal(await readUnfinishedApprovalPlanClaim(path), null);
 });
 
 test('generic Approval Plan rejects bot approval without changing the plan or starting an Agent', async t => {
