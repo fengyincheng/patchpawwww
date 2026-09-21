@@ -12,6 +12,7 @@ docs/_handoff/
 .secrets/
 /secrets/
 var/
+/.local/
 /web/dist/
 
 # 内部交接/返工文档：不进公开仓库
