@@ -11,17 +11,24 @@ test('required operation assets load and compose shared repair behavior', () => 
     'repair-feedback', 'repair-closeout', 'stop-closeout', 'review-json-retry']) {
     assert.ok(loadOperation(name).length, name);
   }
-  assert.equal(conflictPrompt.includes('真实合并'), true);
-  assert.equal(conflictPrompt.includes('submit_conflict_proposal'), true);
+  assert.equal(conflictPrompt.includes('未合并索引'), true);
+  assert.equal(conflictPrompt.includes('submit_conflict_proposal'), false);
+  assert.equal(conflictPrompt.includes('自然语言 / Markdown'), true);
   assert.equal(ciRepairPrompt.includes('read_ci_evidence'), true);
-  assert.equal(ciRepairPrompt.includes('request_repair_verification'), true);
+  assert.equal(ciRepairPrompt.includes('request_repair_verification'), false);
   assert.equal(reviewPrompt.includes('只读 /review 任务'), true);
-  assert.equal(reviewPrompt.includes('只返回 JSON'), true);
-  assert.equal(reviewPrompt.includes('"recommendation"'), true);
+  assert.equal(reviewPrompt.includes('只返回 JSON'), false);
+  assert.equal(reviewPrompt.includes('ReviewResult'), false);
+  assert.equal(reviewPrompt.includes('review-json-retry'), false);
+  assert.equal(reviewPrompt.includes('自然语言 / Markdown'), true);
   assert.equal(conversationPrompt.includes('reply_to_pr'), true);
   assert.equal(conversationPrompt.includes('不要启动修复或评审'), true);
-  assert.equal(composeOperations('conflict', 'repair-completion').includes('只提交一份结构化冲突提案'), true);
-  assert.equal(composeOperations('conflict', 'repair-completion').includes('git add'), false);
+  const conflictPlan = composeOperations('conflict', 'plan-mode');
+  assert.equal(conflictPlan.includes('只读分析并返回自然语言 / Markdown 计划'), true);
+  assert.equal(conflictPlan.includes('不要返回 JSON'), true);
+  assert.equal(conflictPlan.includes('git add'), false);
+  const conflictApprovedWrite = composeOperations('conflict');
+  assert.equal(conflictApprovedWrite.includes('approved write'), true);
 });
 
 test('operation rendering interpolates explicit values and fails clearly', () => {

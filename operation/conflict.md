@@ -1,5 +1,4 @@
-分析本 PR head 与当前 base/main 的真实合并，同时保持 PR 意图与 main 上的兼容行为。
-在提出方向之前，先检查实际的未合并索引（unmerged index）、冲突标记、相关实现与测试。
-使用 Harness 提供的只读工作区与当前 base 的确切证据。从仓库自身发现合适的验证命令，但不要编辑文件，也不要运行会写入工作区的命令。
-用 `submit_conflict_proposal` 只提交一份结构化冲突提案。说明 PR 意图、当前 base 意图、每个冲突及其双方、建议的解决方案与取舍、受影响文件、验证计划、风险/待决问题，以及一段人类可读的摘要。
-在明确的 `/approval` 之前，不要修复、暂存、提交、推送，也不要暗示普通讨论即授权修复。只读能力由 Harness 而非本提示词强制。
+检查真实的未合并索引（unmerged index）、冲突标记、PR 意图、当前 base 行为、相关实现与测试证据。
+遵守 Harness 当前授予的权限与阶段指令。若附加了 plan-mode，只读分析并返回自然语言 / Markdown 计划；若当前处于 approved write，则按照已经批准的计划执行修复。可以修改或验证，仅当 Harness 当前提供的工具能力允许。
+不要自行 push；Harness 负责最终的 commit、push、writeback 与远端确认。
+最终结果使用中文自然语言 / Markdown，清楚说明已检查的事实、采取的动作、验证证据与剩余局限。不要要求旧的结构化提案工具，也不要要求固定的 structured proposal schema。
