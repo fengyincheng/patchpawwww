@@ -1,6 +1,7 @@
 import { resolveRun } from '../src/observability/run-resolver.ts';
 import { parseTargetCommandArgs, targetCommandHelp } from '../src/observability/cli-options.ts';
-import { readNormalizedTrace, readRunResult } from '../src/observability/run-reader.ts';
+import { readNormalizedTrace, readRunResult, readCommandFacts } from '../src/observability/run-reader.ts';
+import { readPublicationView } from '../src/observability/publication.ts';
 import { renderMalformed, renderSummary } from '../src/observability/renderer.ts';
 import { summarizeRun } from '../src/observability/run-summary.ts';
 
@@ -11,7 +12,9 @@ async function main() {
   const trace = await readNormalizedTrace(run);
   for (const malformed of trace.malformed) console.error(renderMalformed(malformed.line, malformed.message, malformed.excerpt, options.mode));
   const result = await readRunResult(run);
-  console.log(renderSummary(summarizeRun({ runId: run.runId, manifest: run.manifest, result, state: run.state, events: trace.events }), options.mode));
+  const publication = await readPublicationView({ dir: run.dir, events: trace.events, terminal: !!result });
+  const command = await readCommandFacts(run.dir);
+  console.log(renderSummary(summarizeRun({ runId: run.runId, manifest: run.manifest, result, state: run.state, events: trace.events, publication, command }), options.mode));
 }
 
 try { await main(); }

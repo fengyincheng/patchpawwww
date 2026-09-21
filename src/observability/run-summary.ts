@@ -1,11 +1,17 @@
 import { workerStatus, type RunState } from '../runner/state.ts';
 import type { ObservableEvent } from './types.ts';
+import type { PublicationView } from './publication.ts';
+import type { CommandFacts } from './run-reader.ts';
 import type { RunManifest, RunResult } from './run-resolver.ts';
 
 export interface RunSummary {
   runId: string;
   executionId?: number;
+  repo?: string;
+  prNumber?: number;
   task?: string;
+  permission?: string;
+  commandExecutionType?: string;
   phase?: string;
   status: string;
   worker: 'idle' | 'running' | 'interrupted' | 'unknown';
@@ -21,14 +27,17 @@ export interface RunSummary {
   toolErrors: number;
   errors: number;
   validations: number;
+  ciPolls: number;
   commits: number;
   pushes: number;
   remoteConfirmations: number;
+  publications: number;
   workspace?: string;
   head?: string;
   lastCommit?: string;
   lastPush?: string;
   result?: RunResult;
+  publication?: PublicationView;
 }
 
 export interface RunSummaryInput {
@@ -37,6 +46,8 @@ export interface RunSummaryInput {
   result?: RunResult | null;
   state?: RunState | null;
   events: ObservableEvent[];
+  publication?: PublicationView;
+  command?: CommandFacts;
 }
 
 function detailText(event: ObservableEvent, key: string) {
@@ -69,12 +80,16 @@ export function summarizeRun(input: RunSummaryInput): RunSummary {
   const state = input.state ?? null;
   const summary: RunSummary = {
     runId: input.runId, executionId: typeof input.manifest?.execution_id === 'number' ? input.manifest.execution_id : state?.execution_id,
-    task: manifestTask(input.manifest), phase: state?.phase, status: typeof result?.status === 'string' ? result.status : state?.active ? 'active' : state?.phase ?? 'unknown',
+    repo: typeof input.manifest?.repo === 'string' ? input.manifest.repo : state?.repo,
+    prNumber: typeof input.manifest?.pr_number === 'number' ? input.manifest.pr_number : state?.pr_number,
+    task: manifestTask(input.manifest), permission: input.command?.permission, commandExecutionType: input.command?.executionType,
+    phase: state?.phase, status: typeof result?.status === 'string' ? result.status : state?.active ? 'active' : state?.phase ?? 'unknown',
     worker: state ? workerStatus(state) : result ? 'idle' : 'unknown', currentActivity: 'idle',
     startedAt: typeof input.manifest?.started_at === 'string' ? input.manifest.started_at : undefined,
-    requests: 0, attempts: 0, retries: 0, tools: 0, toolErrors: 0, errors: 0, validations: 0, commits: 0, pushes: 0, remoteConfirmations: 0,
+    requests: 0, attempts: 0, retries: 0, tools: 0, toolErrors: 0, errors: 0, validations: 0, ciPolls: 0, commits: 0, pushes: 0, remoteConfirmations: 0, publications: 0,
     head: typeof result?.final_head_sha === 'string' && result.final_head_sha ? result.final_head_sha : state?.current_head_sha || undefined,
     result,
+    ...(input.publication ? { publication: input.publication } : {}),
   };
   const activeTools = new Map<string, string>();
   const pendingProviders = new Set<string>();
@@ -119,6 +134,7 @@ export function summarizeRun(input: RunSummaryInput): RunSummary {
     }
     if (event.kind === 'error') summary.errors++;
     if (source === 'validation' || source === 'repair_verification') summary.validations++;
+    if (source === 'ci_poll') summary.ciPolls++;
     if (source === 'repair_verification_requested') validationPending = true;
     if (source === 'repair_verification') validationPending = false;
     if (source === 'ci_observation_wait') waitingForCi = true;
@@ -134,6 +150,7 @@ export function summarizeRun(input: RunSummaryInput): RunSummary {
       summary.head = summary.lastPush ?? summary.head;
     }
     if (source.endsWith('push_confirmed')) summary.remoteConfirmations++;
+    if (event.kind === 'publication') summary.publications++;
     summary.workspace = detailText(event, 'workspace') ?? summary.workspace;
   }
 

@@ -1,5 +1,6 @@
 import { cleanJson, redactText, redactValue } from './redaction.ts';
 import type { ObservableEvent } from './types.ts';
+import type { PublicationRecord, PublicationView } from './publication.ts';
 import type { RunSummary } from './run-summary.ts';
 import type { ListedRun } from './run-resolver.ts';
 
@@ -58,6 +59,47 @@ function boundedText(value: unknown) {
   return String(bounded(value));
 }
 
+function publicationLine(record: PublicationRecord) {
+  const parts = [`${record.purpose}: ${record.state}`];
+  if (record.status && record.status !== record.state) parts.push(`status=${record.status}`);
+  parts.push(`classification=${record.classification}`);
+  if (record.httpStatus !== null && record.httpStatus !== undefined) parts.push(`http=${record.httpStatus}`);
+  if (record.errorName) parts.push(`error=${record.errorName}`);
+  if (record.errorCategory) parts.push(`category=${record.errorCategory}`);
+  if (record.retryAfterMs !== null && record.retryAfterMs !== undefined) parts.push(`retry_after_ms=${record.retryAfterMs}`);
+  if (record.remoteId !== undefined) parts.push(`remote=${record.remoteId}`);
+  return parts.join(' ');
+}
+
+function publicationLines(publication: PublicationView, verbose = false) {
+  if (!verbose) {
+    const notice = (publication.notice?.state !== 'delivered' ? publication.notice : undefined)
+      ?? publication.records.find(record => record.state !== 'delivered')
+      ?? publication.notice
+      ?? publication.records.at(-1);
+    if (!notice) return [];
+    const parts = [publicationLine(notice)];
+    if (notice.httpStatus !== null && notice.httpStatus !== undefined) parts.push(`HTTP ${notice.httpStatus}`);
+    if (notice.errorMessage) parts.push(`reason: ${boundedText(notice.errorMessage)}`);
+    if (notice.documentationUrl) parts.push(`documentation: ${boundedText(notice.documentationUrl)}`);
+    if (notice.requestId) parts.push(`request: ${boundedText(notice.requestId)}`);
+    const lines = [parts.join(' · ')];
+    if (publication.blockedWithoutDelivery) lines.push('TASK TERMINAL, DELIVERY NOT CONFIRMED — the run ended but the user was not reached.');
+    return lines;
+  }
+  const lines = ['', 'Publication'];
+  for (const record of publication.records) {
+    lines.push(`  ${boundedText(publicationLine(record))}`);
+    if (record.errorMessage) lines.push(`    reason: ${boundedText(record.errorMessage)}`);
+    if (record.documentationUrl) lines.push(`    documentation: ${boundedText(record.documentationUrl)}`);
+    if (record.requestId) lines.push(`    request: ${boundedText(record.requestId)}`);
+    lines.push(`    artifacts: ${boundedText(record.artifacts.join(', ') || 'none')}`);
+    if (record.events.length) lines.push(`    events: ${boundedText(record.events.join(', '))}`);
+  }
+  if (publication.blockedWithoutDelivery) lines.push('  TASK TERMINAL, DELIVERY NOT CONFIRMED — the run ended but the user was not reached.');
+  return lines;
+}
+
 function manifestRepo(manifest: ListedRun['manifest']) {
   for (const key of ['repository', 'repository_path', 'path_with_namespace', 'full_name', 'repo']) {
     if (typeof manifest?.[key] === 'string') return manifest[key];
@@ -85,10 +127,12 @@ function summaryLines(summary: RunSummary) {
     'PatchPaw Agent Status',
     '',
     `Run        ${boundedText(summary.runId)}`,
+    `Repo/PR    ${boundedText(summary.repo ? `${summary.repo}#${summary.prNumber ?? '?'}` : 'unknown')}`,
     `Execution  ${summary.executionId ?? 'unknown'}`,
     `Worker     ${summary.worker}`,
     `Phase      ${boundedText(summary.phase ?? 'unknown')}`,
     `Task       ${boundedText(summary.task ?? 'unknown')}`,
+    `Permission ${boundedText(summary.permission ?? 'unknown')}`,
     `Status     ${boundedText(summary.status)}`,
     `Current    ${boundedText(summary.currentActivity)}`,
     `Started    ${boundedText(summary.startedAt ?? 'unknown')}`,
@@ -103,6 +147,7 @@ function summaryLines(summary: RunSummary) {
     `Tool errors ${summary.toolErrors}`,
     `Errors     ${summary.errors}`,
     `Validations ${summary.validations}`,
+    `CI polls   ${summary.ciPolls}`,
     `Commits    ${summary.commits}`,
     `Pushes     ${summary.pushes}`,
     `Confirmed  ${summary.remoteConfirmations}`,
@@ -132,7 +177,9 @@ export function renderSummary(summary: RunSummary, mode: RenderMode = 'readable'
   const safe = redactValue(summary) as RunSummary;
   if (mode === 'json') return cleanJson(bounded({ ...safe, result: safe.result ? resultProjection(safe.result) : undefined }));
   if (mode === 'compact') return `${boundedText(safe.runId)} ${boundedText(safe.status)} phase=${boundedText(safe.phase ?? 'unknown')} current=${boundedText(safe.currentActivity)} tools=${safe.tools} errors=${safe.errors}`;
-  return summaryLines(safe).join('\n');
+  const lines = summaryLines(safe);
+  if (safe.publication) lines.push(...publicationLines(safe.publication, mode === 'verbose'));
+  return lines.join('\n');
 }
 
 export function renderObserverHeader(runId: string, mode: RenderMode = 'readable') {

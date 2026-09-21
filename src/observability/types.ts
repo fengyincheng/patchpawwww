@@ -15,7 +15,7 @@ export interface TraceReadBatch {
 
 export const OBSERVABLE_KINDS = [
   'run', 'phase', 'model', 'thinking', 'tool', 'git', 'validation',
-  'workspace', 'warning', 'error', 'result',
+  'ci_poll', 'ci_failure_evidence', 'workspace', 'approval', 'publication', 'human', 'warning', 'error', 'result',
 ] as const;
 
 export type ObservableKind = typeof OBSERVABLE_KINDS[number];

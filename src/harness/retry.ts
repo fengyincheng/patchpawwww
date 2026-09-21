@@ -1,4 +1,5 @@
 import { setTimeout } from 'node:timers/promises';
+import { redactText } from '../observability/redaction.ts';
 
 export class ProviderUnavailable extends Error {
   readonly code = 'provider_unavailable';
@@ -31,6 +32,23 @@ export class ProviderResponseError extends Error {
   get retryable() { return this.details.retryable ?? false; }
 }
 
+const SAFE_MESSAGE_CHARS = 400;
+
+function responseFacts(error: unknown) {
+  const e = error as { response?: { data?: { message?: unknown; documentation_url?: unknown };
+    headers?: Record<string, string | number | undefined> }; headers?: Record<string, string | number | undefined> };
+  const data = e.response?.data;
+  const headers = e.response?.headers ?? e.headers ?? {};
+  const header = (name: string) => {
+    const value = headers[name] ?? headers[name.toLowerCase()];
+    return value === undefined ? undefined : String(value);
+  };
+  const message = typeof data?.message === 'string' ? redactText(data.message).slice(0, SAFE_MESSAGE_CHARS) : undefined;
+  const documentation = typeof data?.documentation_url === 'string' ? redactText(data.documentation_url) : undefined;
+  const requestId = header('x-github-request-id') ?? header('x-request-id') ?? undefined;
+  return { message, documentation_url: documentation, request_id: requestId };
+}
+
 export function providerError(error: unknown) {
   const e = error as { status?: number; statusCode?: number; code?: string; name?: string; message?: string; cause?: { code?: string; cause?: { code?: string } };
     failureCode?: string; upstreamCode?: string | number; upstreamMessage?: string; retryable?: boolean; details?: ProviderFailureDetails };
@@ -38,7 +56,7 @@ export function providerError(error: unknown) {
   return { status: e.status ?? e.statusCode ?? details.status, code: e.code ?? e.cause?.code ?? e.cause?.cause?.code,
     name: e.name, failure_code: e.failureCode ?? details.failureCode, upstream_status: e.status ?? e.statusCode ?? details.status,
     upstream_code: e.upstreamCode ?? details.upstreamCode, upstream_message: e.upstreamMessage ?? details.upstreamMessage,
-    retryable: e.retryable ?? details.retryable, attempts: details.attempts };
+    retryable: e.retryable ?? details.retryable, attempts: details.attempts, ...responseFacts(error) };
 }
 export function retryAfterMs(error: unknown) {
   const e = error as { retryAfter?: string | number; response?: { headers?: Record<string, string | number | undefined> }; headers?: Record<string, string | number | undefined>; details?: ProviderFailureDetails };

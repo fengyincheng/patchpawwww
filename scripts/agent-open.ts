@@ -1,6 +1,7 @@
 import { resolveRun, RunResolutionError } from '../src/observability/run-resolver.ts';
 import { parseTargetCommandArgs, TARGET_COMMAND_HELP } from '../src/observability/cli-options.ts';
-import { readNormalizedTrace, normalizeTraceBatch, readRunResult, readStateForRun } from '../src/observability/run-reader.ts';
+import { readNormalizedTrace, normalizeTraceBatch, readRunResult, readStateForRun, readCommandFacts } from '../src/observability/run-reader.ts';
+import { readPublicationView } from '../src/observability/publication.ts';
 import { followTrace } from '../src/observability/trace-follow.ts';
 import { renderMalformed, renderObservableEvent, renderObserverHeader, renderObserverNotice, renderSummary, type RenderMode } from '../src/observability/renderer.ts';
 import { summarizeRun } from '../src/observability/run-summary.ts';
@@ -78,7 +79,9 @@ async function main() {
     }
     if (detached) { write(renderObserverNotice('detached', options.mode)); return; }
     if (result || !!(state?.active && workerStatus(state) === 'interrupted')) {
-      const summary = summarizeRun({ runId: run.runId, manifest: run.manifest, result, state, events: allEvents });
+      const publication = await readPublicationView({ dir: run.dir, events: allEvents, terminal: !!result });
+      const command = await readCommandFacts(run.dir);
+      const summary = summarizeRun({ runId: run.runId, manifest: run.manifest, result, state, events: allEvents, publication, command });
       if (options.mode !== 'json') write('');
       write(renderSummary(summary, options.mode));
     }

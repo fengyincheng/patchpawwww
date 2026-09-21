@@ -37,6 +37,11 @@ export interface SafeCommunicationError {
   code: string | null;
   name: string | null;
   category: string;
+  /** Optional for legacy rows; new producers always persist the retry decision. */
+  classification?: 'retryable' | 'permanent';
+  message?: string | null;
+  documentation_url?: string | null;
+  request_id?: string | null;
   retry_after_ms?: number | null;
 }
 

@@ -45,7 +45,10 @@ export function safeError(error: unknown): SafeCommunicationError {
   const facts = providerError(error);
   const status = facts.status ?? null;
   const category = status === null || status === undefined ? 'transport' : status === 429 || status >= 500 ? 'transient_http' : 'http';
-  return { status, code: facts.code ?? null, name: facts.name ?? null, category, retry_after_ms: retryAfterMs(error) ?? null };
+  return { status, code: facts.code ?? null, name: facts.name ?? null, category,
+    classification: isTransient(error) ? 'retryable' : 'permanent',
+    message: facts.message ?? null, documentation_url: facts.documentation_url ?? null,
+    request_id: facts.request_id ?? null, retry_after_ms: retryAfterMs(error) ?? null };
 }
 
 function terminal(status: OutboundStatus) {
@@ -284,7 +287,7 @@ export async function cancelOutboundDelivery(root: string, stored: StoredItem, r
     const current = await store.getOutboundByDeliveryId(stored.item.delivery_id);
     if (!current || terminal(current.item.status)) return current?.item;
     const cancelled = await store.cancelOutboundStale(current.item.delivery_id, {
-      status: null, code: reason, name: 'OutboundSuperseded', category: 'stale', retry_after_ms: null,
+      status: null, code: reason, name: 'OutboundSuperseded', category: 'stale', classification: 'permanent', retry_after_ms: null,
     });
     if (cancelled?.item.status === 'cancelled_stale') return (await store.markFinalized(current.item.delivery_id))?.item;
     return cancelled?.item;

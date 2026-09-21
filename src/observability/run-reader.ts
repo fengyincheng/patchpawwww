@@ -40,6 +40,55 @@ export async function readRunResult(run: Pick<ResolvedRun, 'resultPath'>) {
   }
 }
 
+export interface RunArtifact {
+  name: string;
+  /** absent: the run never wrote it; corrupt: it exists but is unreadable. */
+  state: 'present' | 'absent' | 'corrupt';
+  value: Record<string, unknown> | null;
+  error?: string;
+}
+
+export async function readRunArtifact(dir: string, name: string): Promise<RunArtifact> {
+  let raw: string;
+  try { raw = await readFile(join(dir, name), 'utf8'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { name, state: 'absent', value: null };
+    throw error;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('artifact is not a JSON object');
+    return { name, state: 'present', value: parsed as Record<string, unknown> };
+  } catch (error) {
+    return { name, state: 'corrupt', value: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export interface CommandFacts {
+  permission?: string;
+  executionType?: string;
+  templateType?: string;
+  slashName?: string;
+  snapshotSha256?: string;
+}
+
+/** The immutable Command Snapshot is authoritative for the permission used by a run. */
+export async function readCommandFacts(dir: string): Promise<CommandFacts> {
+  const artifact = await readRunArtifact(dir, 'command-snapshot.json');
+  const snapshot = artifact.value;
+  if (!snapshot) return {};
+  const command = snapshot.command && typeof snapshot.command === 'object' && !Array.isArray(snapshot.command)
+    ? snapshot.command as Record<string, unknown> : {};
+  const value = (input: unknown) => typeof input === 'string' ? input : undefined;
+  return {
+    permission: value(command.permission),
+    executionType: value(command.execution_type),
+    templateType: value(snapshot.template_type),
+    slashName: value(command.slash_name),
+    snapshotSha256: value(snapshot.snapshot_sha256),
+  };
+}
+
 async function stateFiles(root: string): Promise<string[]> {
   let entries;
   try { entries = await readdir(root, { withFileTypes: true }); }

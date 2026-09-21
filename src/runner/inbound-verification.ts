@@ -17,6 +17,9 @@ function errorRecord(error: unknown): SafeCommunicationError {
   const facts = providerError(error);
   return { status: facts.status ?? null, code: facts.code ?? null, name: facts.name ?? null,
     category: facts.status !== undefined && (facts.status >= 500 || facts.status === 429) ? 'transient_http' : 'verification',
+    classification: isTransient(error) ? 'retryable' : 'permanent',
+    message: facts.message ?? null, documentation_url: facts.documentation_url ?? null,
+    request_id: facts.request_id ?? null,
     retry_after_ms: retryAfterMs(error) ?? null };
 }
 
