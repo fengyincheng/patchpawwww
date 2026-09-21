@@ -7,12 +7,15 @@ import {
   ControlPlaneError,
   bootstrapControlPlane,
   closeControlPlaneDb,
+  createPrompt,
+  getCommand,
   getRepositoryByName,
   loadCommandSnapshot,
   openControlPlaneDb,
   resolveExecution,
   setProviderCredential,
   getProvider,
+  updateCommand,
   updatePrompt,
   updateProvider,
   writeCommandSnapshot,
@@ -75,10 +78,29 @@ test('resolver reads one effective configuration and builds a traceable immutabl
 test('resolver fails closed for missing roles and disabled providers without exposing credentials', async () => {
   const { root, db, repository, report } = await isolatedControlPlane();
   try {
-    const review = await resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/review', executionId: 'exec-review-1' });
-    const main = review.prompts.find(prompt => prompt.role === 'review')!;
-    await updatePrompt(db, main.id, { role: null }, { expectedRevision: main.revision });
-    await expectCode(resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/review', executionId: 'exec-review-2' }), 'required_binding');
+    // Builtin Prompt identity (slug/role) is locked, so induce missing-role
+    // conditions through the effective command bindings rather than mutating
+    // the engine-owned asset.
+    const conflict = await resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/conflict', executionId: 'exec-conflict-1' });
+    assert.equal(conflict.permission, 'read_write_approval');
+    const planMode = conflict.prompts.find(prompt => prompt.role === 'plan-mode')!;
+    const conflictCommand = (await getCommand(db, conflict.command!.id))!;
+    await updateCommand(db, conflictCommand.id, {
+      promptBindings: conflictCommand.promptBindings.map(binding =>
+        binding.assetId === planMode.id ? { ...binding, enabled: false } : binding),
+    }, { expectedRevision: conflictCommand.revision });
+    await expectCode(resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/conflict', executionId: 'exec-conflict-plan-missing' }), 'required_binding');
+
+    const roleless = await createPrompt(db, {
+      scope: 'repository', repositoryId: repository.id, slug: 'conflict-roleless', title: 'Role-less conflict stand-in', role: null,
+      content: 'ROLELESS_MAIN_PLACEHOLDER',
+    });
+    const afterPlan = (await getCommand(db, conflictCommand.id))!;
+    await updateCommand(db, afterPlan.id, {
+      promptBindings: afterPlan.promptBindings.map(binding =>
+        binding.bindingKind === 'main' ? { ...binding, assetId: roleless.id } : binding),
+    }, { expectedRevision: afterPlan.revision });
+    await expectCode(resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/conflict', executionId: 'exec-conflict-2' }), 'required_binding');
 
     const provider = await getProvider(db, report.provider.id);
     await updateProvider(db, report.provider.id, { enabled: false }, { expectedRevision: provider!.revision });
