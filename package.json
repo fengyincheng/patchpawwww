@@ -27,7 +27,8 @@
     "check": "tsc --noEmit",
     "build": "vite build --config web/vite.config.ts",
     "verify:frontend": "node --import tsx scripts/verify-frontend.ts",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:serial": "node --import tsx scripts/run-test-files.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.44",
