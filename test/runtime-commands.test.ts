@@ -36,7 +36,6 @@ test('intent parsing resolves the live command registry and keeps controls safe'
     const prompts = await listPrompts(db, { scope: 'repository', repositoryId: repository.id });
     const skills = await listSkills(db, { scope: 'repository', repositoryId: repository.id });
     const review = prompts.find(value => value.role === 'review')!;
-    const retry = prompts.find(value => value.role === 'review-json-retry')!;
     const shared = prompts.find(value => value.role === 'shared')!;
     const help = skills.find(value => value.slug === 'patchpaw-human-help')!;
     const custom = await createCommand(db, {
@@ -49,7 +48,6 @@ test('intent parsing resolves the live command registry and keeps controls safe'
       promptBindings: [
         { assetId: review.id, position: 1, enabled: true, bindingKind: 'main' },
         { assetId: shared.id, position: 2, enabled: true, bindingKind: 'common' },
-        { assetId: retry.id, position: 3, enabled: true, bindingKind: 'auxiliary' },
       ],
       skillBindings: [{ assetId: help.id, position: 1, enabled: true }],
     });
@@ -59,7 +57,7 @@ test('intent parsing resolves the live command registry and keeps controls safe'
     });
     assert.deepEqual(await parsePRIntent(db, repository.id, '@patchpawwww /confict', 'patchpawwww'), {
       kind: 'command', commandId: (await getCommandByName(db, repository.id, '/conflict'))!.id,
-      slashName: 'conflict', executionType: 'conflict', permission: 'read_write',
+      slashName: 'conflict', executionType: 'conflict', permission: 'read_write_approval',
     });
     assert.deepEqual(await parsePRIntent(db, repository.id, '@patchpawwww /approval', 'patchpawwww'), { kind: 'control', control: 'approval' });
     assert.deepEqual(await parsePRIntent(db, repository.id, '@patchpawwww /APPROVE', 'patchpawwww'), { kind: 'control', control: 'approval' });
@@ -116,13 +114,12 @@ test('runner executes a configured repair command with its snapshot model and Pr
     const repository = (await getRepositoryByName(db, 'owner/lab'))!;
     const prompts = await listPrompts(db, { scope: 'repository', repositoryId: repository.id });
     const skills = await listSkills(db, { scope: 'repository', repositoryId: repository.id });
-    const completion = prompts.find(value => value.role === 'repair-completion')!;
-    await updatePrompt(db, completion.id, { content: `${completion.content}\nCUSTOM_RUNTIME_COMMAND_MARKER` }, { expectedRevision: completion.revision });
     const shared = prompts.find(value => value.role === 'shared')!;
-    const feedback = prompts.find(value => value.role === 'repair-feedback')!;
-    const noVerification = prompts.find(value => value.role === 'repair-no-verification')!;
-    const empty = prompts.find(value => value.role === 'repair-verification-empty')!;
     const help = skills.find(value => value.slug === 'patchpaw-human-help')!;
+    const repairPrompt = await createPrompt(db, {
+      scope: 'repository', repositoryId: repository.id, slug: 'runtime-repair', title: 'Runtime repair', role: null,
+      content: 'CUSTOM_RUNTIME_COMMAND_MARKER\n修复当前任务并以自然语言 / Markdown 汇报结果。',
+    });
     await createCommand(db, {
       repositoryId: repository.id,
       slashName: '/Fix-It',
@@ -131,11 +128,8 @@ test('runner executes a configured repair command with its snapshot model and Pr
       permission: 'read_write',
       providerModelId: (await getCommandByName(db, repository.id, '/ci'))!.providerModelId,
       promptBindings: [
-        { assetId: completion.id, position: 1, enabled: true, bindingKind: 'main' },
+        { assetId: repairPrompt.id, position: 1, enabled: true, bindingKind: 'main' },
         { assetId: shared.id, position: 2, enabled: true, bindingKind: 'common' },
-        { assetId: feedback.id, position: 3, enabled: true, bindingKind: 'auxiliary' },
-        { assetId: noVerification.id, position: 4, enabled: true, bindingKind: 'auxiliary' },
-        { assetId: empty.id, position: 5, enabled: true, bindingKind: 'auxiliary' },
       ],
       skillBindings: [{ assetId: help.id, position: 1, enabled: true }],
     });

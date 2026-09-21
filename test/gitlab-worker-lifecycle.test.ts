@@ -126,13 +126,10 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
     const prompt = (role: string) => prompts.find(value => value.role === role)!;
     await createCommand(controlPlane, { repositoryId: repository.id, slashName: '/repair', displayName: '/repair', executionType: 'repair', permission: 'read_write',
       providerModelId: bootstrap.model.id, promptBindings: [
-        { assetId: prompt('repair-completion').id, position: 1, enabled: true, bindingKind: 'main' },
-        { assetId: prompt('shared').id, position: 2, enabled: true, bindingKind: 'common' },
-        { assetId: prompt('repair-feedback').id, position: 3, enabled: true, bindingKind: 'auxiliary' },
-        { assetId: prompt('repair-no-verification').id, position: 4, enabled: true, bindingKind: 'auxiliary' },
-        { assetId: prompt('repair-verification-empty').id, position: 5, enabled: true, bindingKind: 'auxiliary' },
-        { assetId: prompt('repair-closeout').id, position: 6, enabled: true, bindingKind: 'auxiliary' },
-        { assetId: prompt('stop-closeout').id, position: 7, enabled: true, bindingKind: 'auxiliary' },
+        { assetId: prompt('ci-repair').id, position: 1, enabled: true, bindingKind: 'main' },
+        { assetId: prompt('repair-closeout').id, position: 2, enabled: true, bindingKind: 'auxiliary' },
+        { assetId: prompt('stop-closeout').id, position: 3, enabled: true, bindingKind: 'auxiliary' },
+        { assetId: prompt('shared').id, position: 4, enabled: true, bindingKind: 'common' },
       ], skillBindings: [{ assetId: skills.find(value => value.slug === 'patchpaw-human-help')!.id, position: 1, enabled: true }] });
   } finally { closeControlPlaneDb(controlPlane); }
   const seedTrace = new Trace(join(root, 'seed-trace'));
@@ -188,24 +185,22 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
     if (control.holdNormalModel) await modelReleased;
     let tool: { name: string; args: Record<string, unknown> } | undefined;
     if (control.mode === 'review') {
-      return json({ id: `review-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify({
-        summary: '当前 head 的 review', recommendation: 'comment', findings: [], limitations: [],
-      }) }, finish_reason: 'stop' }] });
+      return json({ id: `review-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
+        message: { role: 'assistant', content: '当前 head 的评审：未发现需要立即处理的可操作问题。局限：仅检查了当前 diff 与相关证据。' }, finish_reason: 'stop' }] });
     }
-    if (control.mode === 'conflict' && toolNames.has('submit_conflict_proposal')) {
-      tool = { name: 'submit_conflict_proposal', args: { summary: '需要确认冲突语义。', pr_intent: '保留 feature 行为。', current_base_intent: 'main 有独立修改。',
-        conflicts: [{ path: 'sample.txt', issue: '同一行内容不同。', pr_side: 'feature', base_side: 'main', proposed_resolution: '由人确认最终内容。', disagreement_or_tradeoff: '两边语义不能自动合并。' }],
-        affected_files: ['sample.txt'], verification_plan: ['test -f sample.txt'], risks_or_open_questions: ['需要人工确认。'], human_markdown_summary: '等待 /approval。' } };
-    } else if (control.mode === 'repair' || control.mode === 'conflict' || (control.mode === 'active-close' && control.repairStep > 0)) {
-      if (control.repairStep++ === 0) tool = control.mode === 'conflict'
-        ? { name: 'mastra_workspace_execute_command', args: { command: "printf 'resolved\\n' > sample.txt && git add sample.txt" } }
-        : { name: 'mastra_workspace_edit_file', args: { path: 'sample.txt', old_string: 'base', new_string: 'fixed' } };
+    if (control.mode === 'conflict' && toolNames.has('mastra_workspace_execute_command')) {
+      if (control.repairStep++ === 0) tool = { name: 'mastra_workspace_execute_command', args: { command: "printf 'resolved\\n' > sample.txt && git add sample.txt" } };
+      else return json({ id: `repair-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
+        message: { role: 'assistant', content: '冲突修复完成：已完成候选修改并确认工作区状态。' }, finish_reason: 'stop' }] });
+    } else if (control.mode === 'repair' || (control.mode === 'active-close' && control.repairStep > 0)) {
+      if (control.repairStep++ === 0) tool = { name: 'mastra_workspace_edit_file', args: { path: 'sample.txt', old_string: 'base', new_string: 'fixed' } };
       else return json({ id: `repair-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
         message: { role: 'assistant', content: '修复完成：已完成候选修改并确认工作区状态。' }, finish_reason: 'stop' }] });
     } else if (control.mode === 'stop' || control.mode === 'active-close') {
       tool = { name: 'request_human_help', args: { reason: '测试任务等待人工处理。' } };
     } else if (control.mode === 'conflict') {
-      tool = { name: 'mastra_workspace_execute_command', args: { command: "printf 'resolved\\n' > sample.txt && git add sample.txt" } };
+      return json({ id: `conflict-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,
+        message: { role: 'assistant', content: '冲突分析计划：已检查未合并索引、PR 意图与当前 base，等待 Harness 的审批阶段。' }, finish_reason: 'stop' }] });
     }
     if (!tool) throw new Error(`Unexpected fake model request for ${control.mode}: ${[...toolNames].join(',')}`);
     return json({ id: `response-${control.modelCalls}`, model: 'fixture', choices: [{ index: 0,

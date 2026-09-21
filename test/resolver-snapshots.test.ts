@@ -20,6 +20,8 @@ import {
   renderTemplate,
   renderTemplateWithDiagnostics,
   validateTemplate,
+  LEGACY_COMMAND_SNAPSHOT_SCHEMA_VERSION,
+  validateCommandSnapshot,
 } from '../src/control-plane/index.ts';
 
 async function isolatedControlPlane() {
@@ -40,11 +42,11 @@ test('resolver reads one effective configuration and builds a traceable immutabl
     const resolved = await resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/review', executionId: 'exec-review-1' });
     assert.equal(resolved.executionType, 'review');
     assert.equal(resolved.permission, 'read_only');
-    assert.equal(resolved.outputContract.kind, 'strict_json');
+    assert.equal(resolved.outputContract.kind, 'none');
     assert.equal(resolved.snapshot.schema_version, 'patchpaw.command-snapshot.v1');
     assert.equal(resolved.snapshot.provider.credential_ref, 'env:ZAI_API_KEY');
     assert.equal(resolved.snapshot.provider.model.identifier, 'glm-snapshot-test');
-    assert.deepEqual(resolved.snapshot.composition.parts.map(part => part.role), ['review', null, 'shared', 'review-json-retry', 'stop-closeout']);
+    assert.deepEqual(resolved.snapshot.composition.parts.map(part => part.role), ['review', null, 'shared', 'stop-closeout']);
     assert.equal(resolved.snapshot.composition.parts.every(part => /^[a-f0-9]{64}$/.test(part.sha256)), true);
 
     const reference = await writeCommandSnapshot(root, 'run-review-1', resolved.snapshot);
@@ -74,9 +76,6 @@ test('resolver fails closed for missing roles and disabled providers without exp
   const { root, db, repository, report } = await isolatedControlPlane();
   try {
     const review = await resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/review', executionId: 'exec-review-1' });
-    const retry = review.prompts.find(prompt => prompt.role === 'review-json-retry')!;
-    await updatePrompt(db, retry.id, { role: null }, { expectedRevision: retry.revision });
-    await expectCode(resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/review', executionId: 'exec-review-retry-missing' }), 'required_binding');
     const main = review.prompts.find(prompt => prompt.role === 'review')!;
     await updatePrompt(db, main.id, { role: null }, { expectedRevision: main.revision });
     await expectCode(resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/review', executionId: 'exec-review-2' }), 'required_binding');
@@ -84,6 +83,24 @@ test('resolver fails closed for missing roles and disabled providers without exp
     const provider = await getProvider(db, report.provider.id);
     await updateProvider(db, report.provider.id, { enabled: false }, { expectedRevision: provider!.revision });
     await expectCode(resolveExecution(db, { kind: 'conversation', repositoryId: repository.id, executionId: 'exec-conversation-1' }), 'provider_unavailable');
+  } finally { closeControlPlaneDb(db); await rm(root, { recursive: true, force: true }); }
+});
+
+test('legacy pre-opaque review snapshots keep strict_json only through explicit compatibility', async () => {
+  const { root, db, repository } = await isolatedControlPlane();
+  try {
+    const resolved = await resolveExecution(db, { kind: 'command', repositoryId: repository.id, slashName: '/review', executionId: 'exec-review-legacy' });
+    const historical = structuredClone(resolved.snapshot);
+    historical.schema_version = LEGACY_COMMAND_SNAPSHOT_SCHEMA_VERSION;
+    historical.snapshot_origin = 'legacy_reconstructed';
+    delete historical.snapshot_sha256;
+    historical.composition.output_contract = { kind: 'strict_json' };
+    historical.legacy_verification = {
+      manifest_sha256: 'legacy-manifest-evidence', source_asset_digest: 'legacy-source-evidence',
+      credential_ref_verified: true, workspace_freshness_verified: true,
+    };
+    assert.throws(() => validateCommandSnapshot(historical), error => error instanceof ControlPlaneError && error.code === 'snapshot_schema_unsupported');
+    assert.doesNotThrow(() => validateCommandSnapshot(historical, { allowLegacy: true }));
   } finally { closeControlPlaneDb(db); await rm(root, { recursive: true, force: true }); }
 });
 
