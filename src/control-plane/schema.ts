@@ -369,13 +369,13 @@ export async function ensureControlPlaneSchema(client: Client) {
     const transaction = await client.transaction('write');
     try {
       if (current === 1) await transaction.executeMultiple(CUSTOM_COMMAND_MIGRATION);
-      if (current === 1 || current === 2) {
+      if (current === 1 || current === 2) await transaction.executeMultiple(APPROVAL_PERMISSION_MIGRATION);
+      if (current >= 1 && current <= 3) {
         for (const [column, definition] of Object.entries(SCM_REPOSITORY_COLUMNS)) {
           if (!repositoryColumns.has(column)) await transaction.execute(`ALTER TABLE repositories ADD COLUMN ${column} ${definition}`);
         }
         await transaction.executeMultiple(SCM_MIGRATION);
       }
-      if (current >= 1) await transaction.executeMultiple(APPROVAL_PERMISSION_MIGRATION);
       await transaction.executeMultiple(CONTROL_PLANE_SCHEMA);
       await transaction.execute({ sql: `INSERT INTO control_plane_migrations(version, applied_at) VALUES (:version, :applied_at)
         ON CONFLICT(version) DO NOTHING`, args: { version: CONTROL_PLANE_MIGRATION_VERSION, applied_at: new Date().toISOString() } });
