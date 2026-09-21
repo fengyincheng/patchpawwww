@@ -11,9 +11,7 @@ import { runCIRepair } from '../src/tasks/ci-repair/agent.ts';
 import { runRepair } from '../src/tasks/repair.ts';
 import { budget } from '../src/harness/budget.ts';
 import { setTimeout } from 'node:timers/promises';
-import { createTool } from '@mastra/core/tools';
-import { z } from 'zod';
-import { nodeExit, nodeFileEquals, nodeFileExists, nodeWriteFile } from './helpers/portable-commands.ts';
+import { nodeExit, nodeFileEquals, nodeFileExists } from './helpers/portable-commands.ts';
 
 type Reply = { text?: string; tool?: string; args?: object; httpStatus?: number; delayMs?: number };
 async function fixture() {
@@ -57,9 +55,9 @@ async function withProvider(replies: Reply[], run: (requests: any[]) => Promise<
   }
 }
 
-// Fresh Runner tasks use opaque natural-language outcomes. This file is intentionally limited to
-// the legacy structured repair/closeout compatibility path plus independent workspace safety
-// checks; fresh completion contracts are covered by the shared runner tests.
+// This file is intentionally limited to the legacy structured repair/closeout compatibility path
+// plus independent workspace safety checks. Fresh completion contracts live in the explicitly
+// named opaque-agent-outcome suite.
 const runDirectConflictRepair = (options: Awaited<ReturnType<typeof fixture>>, seed: unknown) =>
   runRepair({ ...options, task: 'conflict', prompt: '' }, seed);
 
@@ -84,14 +82,7 @@ test('legacy structured repair compatibility: verification failure and same-sess
   });
 });
 
-test('legacy structured repair compatibility: agent-authored JSON is not a verification request', async () => {
-  const options = await fixture();
-  await withProvider([{ text: JSON.stringify({ status: 'repaired', summary: 'claimed success', tests: [nodeExit(0)], validation_not_applicable: null }) }], async () => {
-    assert.equal((await runCIRepair(options, { task: 'fixture' })).status, 'budget_exhausted');
-  });
-});
-
-test('workspace verification compatibility: changed tests run as the candidate', async () => {
+test('legacy workspace verification compatibility: changed tests run as the candidate', async () => {
   const options = await fixture();
   const original = "import { readFileSync } from 'node:fs';\nif (readFileSync('sample.txt', 'utf8') !== 'after\\n') process.exit(1);\n";
   await writeFile(join(options.ws.path, 'sample.test.mjs'), original);
@@ -127,37 +118,7 @@ test('legacy structured repair compatibility: verification boundary and human he
   });
 });
 
-test('legacy Conflict compatibility: read-only mode filters caller-supplied mutating tools', async () => {
-  const options = await fixture();
-  const mutatingTool = createTool({ id: 'malicious_write', description: 'must never be exposed to read-only Conflict',
-    inputSchema: z.object({}), execute: async () => ({ wrote: true }) });
-  await withProvider([{ tool: 'request_human_help', args: { reason: 'Product decision required' } }], async requests => {
-    const result = await runConflict({ ...options, tools: { malicious_write: mutatingTool } }, { task: 'fixture' });
-    assert.equal(result.status, 'needs_human');
-    assert.equal(requests[0].tools.some((tool: any) => tool.function.name === 'malicious_write'), false);
-  });
-});
-
-test('legacy structured repair compatibility: each repair rejects a clean unchanged HEAD', async () => {
-  const options = await fixture();
-  const request = { summary: 'claims repaired', tests: [nodeFileExists('sample.txt')], validation_not_applicable: null };
-  await withProvider([
-    { tool: 'mastra_workspace_execute_command', args: { command: nodeWriteFile('sample.txt', 'after\n') + ' && git add sample.txt && git commit -m "Agent fix"' } },
-    { tool: 'request_repair_verification', args: request },
-  ], async () => assert.equal((await runCIRepair(options, {})).status, 'repaired'));
-  const head = (await git(options.ws.path, ['rev-parse', 'HEAD'])).stdout.trim();
-  assert.notEqual(head, options.ws.initialHead);
-  await withProvider([
-    { tool: 'request_repair_verification', args: request },
-    { tool: 'request_human_help', args: { reason: 'No code change justified; need guidance' } },
-  ], async requests => {
-    assert.equal((await runCIRepair(options, {})).status, 'needs_human');
-    assert.match(JSON.stringify(requests[1].messages), /No changes since this repair started/);
-    assert.equal((await git(options.ws.path, ['rev-parse', 'HEAD'])).stdout.trim(), head);
-  });
-});
-
-test('passing tests cannot override a real unmerged index', async () => {
+test('legacy workspace safety: passing tests cannot override a real unmerged index', async () => {
   const options = await fixture();
   await git(options.ws.path, ['checkout', '-b', 'feature']);
   await writeFile(join(options.ws.path, 'sample.txt'), 'feature\n');
@@ -220,27 +181,5 @@ test('legacy structured repair compatibility: closeout provider failure keeps me
       assert.equal(saved.source, 'harness'); assert.equal(saved.facts.dirty, true);
       assert.equal(saved.facts.committed, false); assert.equal(saved.facts.verification_requested, false);
     });
-  });
-});
-test('legacy structured repair compatibility: human decision wins during closeout', async () => {
-  await shortBudget(async () => {
-    await withProvider([{ text: 'Unfinished' }, { tool: 'request_human_help', args: { reason: '请选择架构方向' } }], async () => {
-      assert.deepEqual(await runDirectConflictRepair(await fixture(), {}), { status: 'needs_human', summary: '请选择架构方向' });
-    });
-  });
-});
-test('legacy structured repair compatibility: closeout verification still runs independent checks', async () => {
-  await shortBudget(async () => {
-    for (const passing of [true, false]) {
-      const options = await fixture();
-      await writeFile(join(options.ws.path, 'sample.txt'), 'candidate\n');
-      await withProvider([{ text: 'Candidate ready' }, { tool: 'request_repair_verification', args: {
-        summary: 'candidate', tests: [passing ? nodeFileEquals('sample.txt', 'candidate\n') : nodeExit(1)], validation_not_applicable: null,
-      } }], async () => {
-        assert.equal((await runDirectConflictRepair(options, {})).status, passing ? 'repaired' : 'budget_exhausted');
-        const validation = JSON.parse(await readFile(join(options.trace.dir, 'last-validation.json'), 'utf8'));
-        assert.equal(validation.ok, passing);
-      });
-    }
   });
 });

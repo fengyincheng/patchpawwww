@@ -37,16 +37,16 @@ async function reviewFixture(replies: Reply[]) {
   return { root, requests, trace: new Trace(join(root, 'trace')), previous, server };
 }
 
-test('review stops with a structured truncation error and does not retry JSON after length', async () => {
+test('opaque review stops with a truncation error and does not retry after length', async () => {
   const fixture = await reviewFixture([{ content: null, finishReason: 'length' }]);
   try {
     await assert.rejects(
-      runReview({ runId: 'length-review', trace: fixture.trace,
+      runReview({ runId: 'length-review', trace: fixture.trace, opaqueOutcome: true,
         ws: { path: fixture.root, initialHead: '', mainSha: '', unmerged: [], mergePending: false } },
       { task: 'review fixture' }),
       (error: any) => error?.code === 'model_output_truncated',
     );
-    assert.equal(fixture.requests.length, 1, 'a length result must not enter the JSON format retry');
+    assert.equal(fixture.requests.length, 1, 'a length result must not enter a format retry');
   } finally {
     if (fixture.previous.key === undefined) delete process.env.ZAI_API_KEY; else process.env.ZAI_API_KEY = fixture.previous.key;
     if (fixture.previous.url === undefined) delete process.env.ZAI_BASE_URL; else process.env.ZAI_BASE_URL = fixture.previous.url;
@@ -54,11 +54,11 @@ test('review stops with a structured truncation error and does not retry JSON af
   }
 });
 
-test('review treats partial content with length as truncated instead of parsing it', async () => {
+test('opaque review treats partial content with length as truncated', async () => {
   const fixture = await reviewFixture([{ content: '{"summary":"partial"', finishReason: 'length' }]);
   try {
     await assert.rejects(
-      runReview({ runId: 'partial-review', trace: fixture.trace,
+      runReview({ runId: 'partial-review', trace: fixture.trace, opaqueOutcome: true,
         ws: { path: fixture.root, initialHead: '', mainSha: '', unmerged: [], mergePending: false } },
       { task: 'review fixture' }),
       (error: any) => error?.code === 'model_output_truncated',
@@ -71,14 +71,14 @@ test('review treats partial content with length as truncated instead of parsing 
   }
 });
 
-test('review accepts a valid stopped JSON result without a retry', async () => {
-  const result = { summary: 'Looks good', recommendation: 'approve', findings: [], limitations: [] };
-  const fixture = await reviewFixture([{ content: JSON.stringify(result), finishReason: 'stop' }]);
+test('opaque review delivers plain Markdown as-is without a retry', async () => {
+  const markdown = '## 评审\n\n改动看起来是安全的，没有发现可操作缺陷。';
+  const fixture = await reviewFixture([{ content: markdown, finishReason: 'stop' }]);
   try {
-    assert.deepEqual(await runReview({ runId: 'valid-review', trace: fixture.trace,
+    assert.deepEqual(await runReview({ runId: 'valid-review', trace: fixture.trace, opaqueOutcome: true,
       ws: { path: fixture.root, initialHead: '', mainSha: '', unmerged: [], mergePending: false } },
-    { task: 'review fixture' }), result);
-    assert.equal(fixture.requests.length, 1);
+    { task: 'review fixture' }), { outcome: 'finished', body: markdown });
+    assert.equal(fixture.requests.length, 1, 'opaque text must not trigger a format retry');
   } finally {
     if (fixture.previous.key === undefined) delete process.env.ZAI_API_KEY; else process.env.ZAI_API_KEY = fixture.previous.key;
     if (fixture.previous.url === undefined) delete process.env.ZAI_BASE_URL; else process.env.ZAI_BASE_URL = fixture.previous.url;
@@ -86,17 +86,36 @@ test('review accepts a valid stopped JSON result without a retry', async () => {
   }
 });
 
-test('review retries once for a stopped invalid JSON result and then accepts valid JSON', async () => {
-  const result = { summary: 'Needs a comment', recommendation: 'comment', findings: [], limitations: [] };
+test('opaque review treats JSON-looking and malformed JSON-looking output as text', async () => {
+  const jsonLooking = '{"summary":"Looks good","recommendation":"approve","findings":[],"limitations":[]}';
+  const malformed = '{"summary":"partial","findings":[';
   const fixture = await reviewFixture([
-    { content: 'not json', finishReason: 'stop' },
-    { content: JSON.stringify(result), finishReason: 'stop' },
+    { content: jsonLooking, finishReason: 'stop' },
+    { content: malformed, finishReason: 'stop' },
   ]);
   try {
-    assert.deepEqual(await runReview({ runId: 'format-retry-review', trace: fixture.trace,
-      ws: { path: fixture.root, initialHead: '', mainSha: '', unmerged: [], mergePending: false } },
-    { task: 'review fixture' }), result);
-    assert.equal(fixture.requests.length, 2);
+    const options = { runId: 'opaque-review', trace: fixture.trace, opaqueOutcome: true as const,
+      ws: { path: fixture.root, initialHead: '', mainSha: '', unmerged: [], mergePending: false } };
+    assert.deepEqual(await runReview(options, { task: 'review fixture' }), { outcome: 'finished', body: jsonLooking });
+    assert.deepEqual(await runReview(options, { task: 'review fixture' }), { outcome: 'finished', body: malformed },
+      'incomplete JSON is still non-empty text and must not be schema-rejected');
+    assert.equal(fixture.requests.length, 2, 'opaque output must not trigger a format retry');
+  } finally {
+    if (fixture.previous.key === undefined) delete process.env.ZAI_API_KEY; else process.env.ZAI_API_KEY = fixture.previous.key;
+    if (fixture.previous.url === undefined) delete process.env.ZAI_BASE_URL; else process.env.ZAI_BASE_URL = fixture.previous.url;
+    await new Promise<void>(resolve => fixture.server.close(() => resolve()));
+  }
+});
+
+test('provider stop with no text becomes a typed protocol failure', async () => {
+  const fixture = await reviewFixture([{ content: '', finishReason: 'stop' }]);
+  try {
+    await assert.rejects(
+      runReview({ runId: 'empty-review', trace: fixture.trace, opaqueOutcome: true,
+        ws: { path: fixture.root, initialHead: '', mainSha: '', unmerged: [], mergePending: false } },
+      { task: 'review fixture' }),
+      (error: any) => error?.code === 'agent_final_response_missing' && error?.name === 'AgentFinalResponseMissing',
+    );
   } finally {
     if (fixture.previous.key === undefined) delete process.env.ZAI_API_KEY; else process.env.ZAI_API_KEY = fixture.previous.key;
     if (fixture.previous.url === undefined) delete process.env.ZAI_BASE_URL; else process.env.ZAI_BASE_URL = fixture.previous.url;
