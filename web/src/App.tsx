@@ -337,7 +337,7 @@ function ModelsPage({ onToast }: { onToast: (message: string) => void }) {
 }
 
 const executionKeys: Record<ExecutionType, MessageKey> = { custom: 'customCommand', review: 'review', repair: 'repair', ci: 'ciRepair', conflict: 'conflict' };
-const permissionKeys: Record<Permission, MessageKey> = { read_only: 'readOnly', read_write: 'readWrite' };
+const permissionKeys: Record<Permission, MessageKey> = { read_only: 'readOnly', read_write: 'readWrite', read_write_approval: 'readWriteApproval' };
 
 function modelOptions(providers: Provider[]) {
   return providers.map(provider => ({ provider, models: (provider.models ?? []).filter(model => model.enabled) })).filter(group => group.models.length > 0);
@@ -368,6 +368,7 @@ function CommandStudio({ repo, onToast }: { repo: string; onToast: (message: str
   const { t, count } = useI18n();
   const [commands, setCommands] = useState<Command[]>([]);
   const [prompts, setPrompts] = useState<PromptAsset[]>([]);
+  const [publicPrompts, setPublicPrompts] = useState<PromptAsset[]>([]);
   const [skills, setSkills] = useState<SkillAsset[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
@@ -382,8 +383,8 @@ function CommandStudio({ repo, onToast }: { repo: string; onToast: (message: str
   const load = useCallback(async () => {
     setLoading(true); setError(undefined);
     try {
-      const [nextCommands, nextPrompts, nextSkills, nextProviders] = await Promise.all([adminApi.commands(repo), adminApi.repositoryPrompts(repo), adminApi.repositorySkills(repo), adminApi.providers()]);
-      setCommands(nextCommands); setPrompts(nextPrompts); setSkills(nextSkills); setProviders(nextProviders);
+      const [nextCommands, nextPrompts, nextSkills, nextProviders, nextPublicPrompts] = await Promise.all([adminApi.commands(repo), adminApi.repositoryPrompts(repo), adminApi.repositorySkills(repo), adminApi.providers(), adminApi.publicPrompts()]);
+      setCommands(nextCommands); setPrompts(nextPrompts); setSkills(nextSkills); setProviders(nextProviders); setPublicPrompts(nextPublicPrompts);
     } catch (err) { setError(err); } finally { setLoading(false); }
   }, [repo]);
   useEffect(() => { void load(); }, [load]);
@@ -403,11 +404,24 @@ function CommandStudio({ repo, onToast }: { repo: string; onToast: (message: str
   const validate = () => {
     if (!draft) return t('createCommandFirst');
     if (!/^[a-z][a-z0-9-]{0,31}$/.test(draft.slash_name)) return t('commandNameValidation');
-    if (draft.execution_type === 'review' && draft.permission !== 'read_only') return t('reviewReadOnlyValidation');
-    if (['repair', 'ci'].includes(draft.execution_type) && draft.permission !== 'read_write') return `${t(executionKeys[draft.execution_type])} ${t('commandsNeedReadWrite')}`;
     if (!draft.provider_model_id) return t('chooseModelForCommand');
     if (draft.enabled && !draft.prompt_bindings.some(binding => binding.enabled && binding.binding_kind === 'main')) return t('customMainPromptRequired');
     return undefined;
+  };
+  const hasPlanMode = draft?.prompt_bindings.some(binding => binding.enabled && binding.binding_kind === 'auxiliary' && prompts.find(asset => asset.id === binding.asset_id)?.role === 'plan-mode') ?? false;
+  const addPlanMode = async () => {
+    if (!draft || hasPlanMode) return;
+    setSaving(true); setError(undefined);
+    try {
+      let asset = prompts.find(candidate => candidate.role === 'plan-mode' && candidate.enabled);
+      if (!asset) {
+        const source = publicPrompts.find(candidate => candidate.role === 'plan-mode');
+        if (!source) { setError(new Error(t('planModeUnavailable'))); return; }
+        asset = await adminApi.copyPublicPrompt(repo, source.id);
+        setPrompts(previous => previous.some(candidate => candidate.id === asset!.id) ? previous : [...previous, asset!]);
+      }
+      update('prompt_bindings', [...draft.prompt_bindings, { asset_id: asset.id, position: draft.prompt_bindings.length + 1, enabled: true, binding_kind: 'auxiliary' }]);
+    } catch (err) { setError(err); } finally { setSaving(false); }
   };
   const save = async (event: FormEvent) => {
     event.preventDefault(); const validation = validate(); if (validation) { setError(new Error(validation)); return; }
@@ -432,10 +446,11 @@ function CommandStudio({ repo, onToast }: { repo: string; onToast: (message: str
         <div className="editor-heading"><div><p className="eyebrow">{isNew ? t('newCommand') : t('commandConfiguration')}</p><h2>{draft.slash_name ? `/${draft.slash_name}` : t('unnamedCommand')}</h2></div><div className="editor-meta">{selectedCommand && <Badge tone="neutral">{t('revision', { revision: selectedCommand.revision })}</Badge>}{dirty && <Badge tone="warning">{t('unsavedChanges')}</Badge>}</div></div>
         <div className="form-grid"><Field label={t('commandName')} hint={t('commandNameHint')} required><TextInput value={draft.slash_name} onChange={event => update('slash_name', event.target.value)} placeholder="readme" required /></Field><Field label={t('displayName')} required><TextInput value={draft.display_name} onChange={event => update('display_name', event.target.value)} required /></Field></div>
         <Field label={t('description')}><textarea className="input compact-textarea" value={draft.description} onChange={event => update('description', event.target.value)} /></Field>
-        <div className="form-grid"><Field label={t('executionTemplate')} required><Select value={draft.execution_type} onChange={event => { const execution = event.target.value as ExecutionType; update('execution_type', execution); if (execution === 'review') update('permission', 'read_only'); else if (execution === 'repair' || execution === 'ci') update('permission', 'read_write'); }}><option value="custom">{t('customCommand')}</option><option value="review">{t('review')}</option><option value="repair">{t('repair')}</option><option value="ci">{t('ciRepair')}</option><option value="conflict">{t('conflict')}</option></Select></Field><Field label={t('permission')} hint={t('permissionHint')}><Select value={draft.permission} onChange={event => update('permission', event.target.value as Permission)}><option value="read_only">{t('readOnly')}</option><option value="read_write">{t('readWrite')}</option></Select></Field></div>
+        <div className="form-grid"><Field label={t('executionTemplate')} required><Select value={draft.execution_type} onChange={event => update('execution_type', event.target.value as ExecutionType)}><option value="custom">{t('customCommand')}</option><option value="review">{t('review')}</option><option value="repair">{t('repair')}</option><option value="ci">{t('ciRepair')}</option><option value="conflict">{t('conflict')}</option></Select></Field><Field label={t('permission')} hint={t('permissionHint')}><Select value={draft.permission} onChange={event => update('permission', event.target.value as Permission)}><option value="read_only">{t('readOnly')}</option><option value="read_write">{t('readWrite')}</option><option value="read_write_approval">{t('readWriteApproval')}</option></Select></Field></div>
         <Field label={t('modelsHeading')} hint={t('modelHint')} required><ModelSelect providers={providers} value={draft.provider_model_id} onChange={value => update('provider_model_id', value)} /></Field>
         {draft.execution_type === 'custom' && <div className="info-callout"><Icon name="lock" /><span>{t('customCommandHint')}</span></div>}
         {draft.execution_type === 'conflict' && draft.permission === 'read_only' && <div className="info-callout"><Icon name="lock" /><span>{t('conflictReadOnly')}</span></div>}
+        {draft.permission === 'read_write_approval' && <div className="info-callout"><Icon name="lock" /><span>{t('approvalPermissionHint')}</span>{!hasPlanMode && <Button type="button" variant="secondary" onClick={() => void addPlanMode()} disabled={saving}>{t('addPlanMode')}</Button>}</div>}
         <Field label={t('enabled')}><label className="switch-line"><input type="checkbox" checked={draft.enabled} onChange={event => update('enabled', event.target.checked)} /><span className="switch" /><span>{draft.enabled ? t('availableCommandParser') : t('disabledConversational')}</span></label></Field>
         <section className="stack-section"><div className="subsection-heading"><div><h3>{t('promptStack')}</h3><p>{draft.execution_type === 'custom' ? t('customPromptStackBody') : t('promptStackBody')}</p></div></div><OrderedBindings kind="prompt" bindings={draft.prompt_bindings} assets={prompts} onChange={bindings => update('prompt_bindings', bindings as PromptBinding[])} /></section>
         <section className="stack-section"><div className="subsection-heading"><div><h3>{t('skillStack')}</h3><p>{t('skillStackBody')}</p></div></div><OrderedBindings kind="skill" bindings={draft.skill_bindings} assets={skills} onChange={bindings => update('skill_bindings', bindings as SkillBinding[])} /></section>
@@ -447,7 +462,9 @@ function CommandStudio({ repo, onToast }: { repo: string; onToast: (message: str
 
 function EffectivePreview({ effective }: { effective: EffectiveConfiguration }) {
   const { t } = useI18n();
-  return <section className="effective-panel"><div className="subsection-heading"><div><p className="eyebrow">{t('resolverPreview')}</p><h3>{t('effectiveConfiguration')}</h3><p>{t('effectivePreviewBody')}</p></div><Badge tone="accent">{effective.permission === 'read_only' ? t('readOnly') : t('readWrite')}</Badge></div><div className="effective-facts"><span><small>{t('providerLabel')}</small><strong>{effective.provider.display_name}</strong></span><span><small>{t('modelsHeading')}</small><strong>{effective.model.display_name || effective.model.model_identifier}</strong></span><span><small>{t('output')}</small><strong>{effective.output_contract.kind}</strong></span><span><small>{t('snapshot')}</small><strong className="mono">{effective.snapshot_sha256.slice(0, 12)}…</strong></span></div><ol className="effective-parts">{effective.parts.map(part => <li key={`${part.kind}-${part.asset_id}-${part.position}`}><span>{part.kind === 'prompt' ? t('prompts') : t('skills')}</span><strong>{part.slug}</strong><small>{part.role ?? t('selectedBinding')} · rev {part.revision} · {part.sha256.slice(0, 10)}…</small></li>)}</ol></section>;
+  const permission = effective.permission === 'read_only' ? t('readOnly') : effective.permission === 'read_write' ? t('readWrite') : t('readWriteApproval');
+  const planModeBound = effective.parts.some(part => part.kind === 'prompt' && part.role === 'plan-mode');
+  return <section className="effective-panel"><div className="subsection-heading"><div><p className="eyebrow">{t('resolverPreview')}</p><h3>{t('effectiveConfiguration')}</h3><p>{t('effectivePreviewBody')}</p></div><Badge tone="accent">{permission}</Badge></div><div className="effective-facts"><span><small>{t('permission')}</small><strong>{permission}</strong></span><span><small>{t('providerLabel')}</small><strong>{effective.provider.display_name}</strong></span><span><small>{t('modelsHeading')}</small><strong>{effective.model.display_name || effective.model.model_identifier}</strong></span><span><small>{t('outputContract')}</small><strong>{effective.output_contract.kind}</strong></span><span><small>{t('planModeBinding')}</small><strong>{planModeBound ? t('bound') : t('notBound')}</strong></span><span><small>{t('snapshot')}</small><strong className="mono">{effective.snapshot_sha256.slice(0, 12)}…</strong></span></div><ol className="effective-parts">{effective.parts.map(part => <li key={`${part.kind}-${part.asset_id}-${part.position}`}><span>{part.kind === 'prompt' ? t('prompts') : t('skills')}</span><strong>{part.slug}</strong><small>{part.role ?? t('selectedBinding')} · rev {part.revision} · {part.sha256.slice(0, 10)}…</small></li>)}</ol></section>;
 }
 
 function ConversationProfilePage({ repo, onToast }: { repo: string; onToast: (message: string) => void }) {

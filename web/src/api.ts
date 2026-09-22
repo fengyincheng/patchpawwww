@@ -1,6 +1,6 @@
 export type ProviderType = 'zhipu' | 'deepseek' | 'openrouter' | 'kimi' | 'qwen';
 export type ExecutionType = 'custom' | 'review' | 'repair' | 'ci' | 'conflict';
-export type Permission = 'read_only' | 'read_write';
+export type Permission = 'read_only' | 'read_write' | 'read_write_approval';
 export type BindingKind = 'main' | 'common' | 'auxiliary';
 
 export interface Repository {
