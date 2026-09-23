@@ -1,0 +1,30 @@
+services:
+  patchpaw:
+    image: ${PATCHPAW_IMAGE:-ghcr.io/fengyincheng/patchpaw:latest}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PATCHPAW_HOME: /var/lib/patchpaw
+      PATCHPAW_LISTEN_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:${PATCHPAW_PORT:-3000}:${PATCHPAW_PORT:-3000}"
+    volumes:
+      - patchpaw-data:/var/lib/patchpaw
+      - ./secrets:/run/secrets/patchpaw:ro
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:' + (process.env.PATCHPAW_PORT || '3000') + '/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  patchpaw-data:

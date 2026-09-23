@@ -1,0 +1,96 @@
+name: Publish Docker image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-image:
+    name: Build and smoke-test linux/amd64 image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build local image
+        run: docker build --tag patchpaw:smoke .
+
+      - name: Verify container contract
+        run: bash docker/smoke-test.sh patchpaw:smoke
+
+  publish:
+    name: Publish linux/amd64 and linux/arm64
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate stable release tag and package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Docker publishing accepts stable vMAJOR.MINOR.PATCH tags only."
+            exit 1
+          fi
+          release_version="${RELEASE_TAG#v}"
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$release_version" != "$package_version" ]]; then
+            echo "Release tag $RELEASE_TAG does not match package.json version $package_version."
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and OCI metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/fengyincheng/patchpaw
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/fengyincheng/patchpawwww
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=PatchPaw
+
+      - name: Build and publish multi-platform image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - name: Report published digest
+        run: echo "Published ghcr.io/fengyincheng/patchpaw@${{ steps.build.outputs.digest }}"
