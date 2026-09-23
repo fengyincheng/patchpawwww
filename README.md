@@ -4,20 +4,39 @@
 
 [English](README.en.md) · [GitLab 配置](docs/GITLAB.md) · [运维说明](docs/OPERATIONS.md) · [安全边界](docs/SECURITY-MODEL.md) · [贡献指南](CONTRIBUTING.md)
 
-这是早期版本，适合愿意自行部署和维护的用户。当前发布支持 Linux、macOS，生产部署推荐 Linux。**暂不支持原生 Windows，目前没有官方 Docker 镜像；未来会考虑提供可在 Windows Docker 环境运行的 Linux 镜像，暂无时间表。**
+这是早期版本，适合愿意自行部署和维护的用户。原生部署支持 Linux、macOS，生产部署推荐 Linux；原生 Windows 暂不支持。官方 Docker 发行方式运行 Linux container，可用于 Linux Docker、Windows Docker Desktop/WSL2 和 macOS Docker Desktop。Docker 运行的是 Linux PatchPaw，并不让 Windows-only 项目检查变成可用。镜像通过匹配版本的 Git tag 发布到 GHCR，首次公开发布前还没有可拉取的官方版本。
 
-快速导航：[安装准备](#准备清单) · [常见命令](#日常使用与常见命令) · [自定义命令](#自定义命令以-explain-为例) · [架构](#架构) · [数据目录](#数据目录结构)
+快速导航：[安装准备](#准备清单) · [Docker 快速开始](#docker-快速开始) · [常见命令](#日常使用与常见命令) · [自定义命令](#自定义命令以-explain-为例) · [架构](#架构) · [数据目录](#数据目录结构)
 
 ## 准备清单
 
-- 一台可长期运行的 Linux 主机或 macOS，Node.js **22.22.0+ 的 22.x 版本**、npm、Git。
+- 原生部署需要一台可长期运行的 Linux 主机或 macOS，以及 Node.js **22.22.0+ 的 22.x 版本**、npm、Git。Docker 部署只要求宿主有 Docker Engine/Compose v2。
 - 一个域名或已有域名的子域名，可以配置 DNS 和 HTTPS 反向代理。
 - 一个你有权创建并安装到目标仓库的 GitHub App，下面会逐项引导。
 - 或一个有权访问目标项目的 GitLab Personal/Project Access Token；GitLab.com 和自托管实例均可，配置方法见 [GitLab 配置](docs/GITLAB.md)。
 - 模型 API 凭据：支持 Zhipu/Z.ai、DeepSeek、OpenRouter、Kimi、Qwen。需自行确认模型、端点、费用和数据政策。
 - 目标项目运行检查所需的工具链，例如 Python、编译器或包管理器；PatchPaw 不会自动准备所有项目依赖。
 
+也可用官方 Docker Linux 镜像部署；需要 Docker Engine 和 Docker Compose v2。Docker 安装和升级见[Docker 部署](docs/DOCKER.md)。
+
 PatchPaw 不提供域名、服务器或模型额度。它会执行仓库代码和模型生成的命令，**不是安全沙箱**。使用专用非 root 账号；不信任的 PR 应放在隔离主机或虚拟机上执行，不要与其他重要凭据共用环境。
+
+## Docker 快速开始
+
+首次官方镜像发布后，复制 `.env.example` 并配置 `.env`，按需把 GitHub App PEM 放在 `secrets/`，然后选择精确版本：
+
+```sh
+cp .env.example .env
+mkdir -p secrets
+# 在 .env 中设置 PATCHPAW_IMAGE=ghcr.io/fengyincheng/patchpaw:vX.Y.Z
+docker compose pull
+docker compose run --rm patchpaw npm run generate:admin-token
+# 把生成的 token 安全写入 .env，再初始化控制面和服务
+docker compose run --rm patchpaw npm run bootstrap:control-plane -- owner/repository
+docker compose up -d
+```
+
+GitLab-only 安装可省略 GitHub PEM。完整步骤、工具链扩展、备份、升级和 native 迁移准备见[Docker 部署指南](docs/DOCKER.md)。
 
 ## 1. 确定公开地址
 

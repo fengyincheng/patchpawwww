@@ -29,3 +29,9 @@ GitLab 连接的 token、Webhook secret 和实例 URL 由 Settings/API 管理时
 ## 发布前检查
 
 部署前在将要运行的 checkout 中执行 `npm ci`、`npm run check`、`npm test`、`npm run build`，确认 frontend verifier 指向相同构建。不要用真实健康检查替代签名 Webhook 测试，也不要为了验证登录把 token 写入命令参数或日志。
+
+## Docker 运维
+
+Docker 部署、volume、只读 PEM mount、toolchain 扩展、升级和 native 迁移准备见 [Docker 部署指南](DOCKER.md)。
+
+`docker compose down` 保留默认 named volume；`docker compose down -v` 会删除运行数据。升级前先确认重要写任务的停止边界，并在当前容器版本执行 `docker compose run --rm patchpaw npm run backup-runtime`。该备份不包含 Provider secret slots，不能代替 runtime volume 和外部 `.env`/PEM 的独立备份。

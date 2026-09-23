@@ -4,20 +4,39 @@ A self-hosted GitHub App / GitLab integration for Pull Request and Merge Request
 
 [中文](README.md) · [GitLab setup](docs/GITLAB.en.md) · [Operations](docs/OPERATIONS.md) · [Security model](docs/SECURITY-MODEL.md) · [Contributing](CONTRIBUTING.md)
 
-This is an early release for operators comfortable maintaining their own deployment. Linux and macOS are supported; Linux is recommended for production. **Native Windows is not currently supported. No official Docker image is available. A Linux container image usable through Docker on Windows may be considered in the future; there is no release date.**
+This is an early release for operators comfortable maintaining their own deployment. Native Linux and macOS deployments are supported; Linux is recommended for production. Native Windows is not supported. The official Docker distribution runs a Linux container and targets Docker on Linux, Windows Docker Desktop/WSL2 and macOS Docker Desktop. This does not make Windows-only project checks available in a Linux container. Images are published to GHCR from matching version tags; no public image tag is available before the first release.
 
-Quick navigation: [Setup](#prerequisites) · [Commands](#everyday-commands) · [Custom commands](#create-a-custom-command-explain) · [Architecture](#architecture) · [Runtime data](#runtime-data-layout)
+Quick navigation: [Setup](#prerequisites) · [Docker quick start](#docker-quick-start) · [Commands](#everyday-commands) · [Custom commands](#create-a-custom-command-explain) · [Architecture](#architecture) · [Runtime data](#runtime-data-layout)
 
 ## Prerequisites
 
-- A persistent Linux host or macOS, Node.js **22.x, version 22.22.0 or newer**, npm and Git.
+- Native deployment needs a persistent Linux host or macOS with Node.js **22.x, version 22.22.0 or newer**, npm and Git. Docker deployment needs Docker Engine and Compose v2 on the host.
 - A domain or subdomain you control, with DNS and an HTTPS reverse proxy.
 - Permission to register a GitHub App and install it on your target repositories.
 - Or a GitLab Personal/Project Access Token with access to the target projects. GitLab.com and self-managed instances are supported; see the [step-by-step GitLab setup guide](docs/GITLAB.en.md).
 - A model API credential. Supported provider types: Zhipu/Z.ai, DeepSeek, OpenRouter, Kimi and Qwen. Check model availability, endpoints, costs and data policies yourself.
 - The target repository's toolchain, such as Python, compilers or package managers. PatchPaw does not provision every project's dependencies.
 
+You can also deploy the official Linux container image with Docker Engine and Docker Compose v2. See the [Docker deployment guide](docs/DOCKER.md).
+
 PatchPaw does not provide hosting, domains or model credits. It executes repository code and model-generated commands and **is not a security sandbox**. Use a dedicated non-root account and an isolated host or VM for untrusted PRs. Do not share the execution environment with unrelated sensitive credentials.
+
+## Docker quick start
+
+After the first official image release, copy `.env.example`, configure `.env`, add the GitHub App PEM under `secrets/` when needed, and select an exact version:
+
+```sh
+cp .env.example .env
+mkdir -p secrets
+# Set PATCHPAW_IMAGE=ghcr.io/fengyincheng/patchpaw:vX.Y.Z in .env
+docker compose pull
+docker compose run --rm patchpaw npm run generate:admin-token
+# Store the generated token in .env, then initialize the control plane and start
+docker compose run --rm patchpaw npm run bootstrap:control-plane -- owner/repository
+docker compose up -d
+```
+
+GitLab-only deployments can omit the GitHub PEM. The [Docker deployment guide](docs/DOCKER.md) covers setup, toolchain extensions, backup, upgrades and native migration planning.
 
 ## 1. Choose one public origin
 
