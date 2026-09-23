@@ -31,6 +31,10 @@ docker volume create "$volume" >/dev/null
 # run as UID 10001, and create durable files without a container /app/.env.
 docker run --rm --volume "$volume:/var/lib/patchpaw" "$image" /bin/sh -ec '
   test "$(id -u)" = 10001
+  test "$HOME" = /home/patchpaw
+  test -w "$HOME"
+  touch "$HOME/.patchpaw-home-smoke"
+  rm "$HOME/.patchpaw-home-smoke"
   test ! -e /app/.env
   mkdir -p "$PATCHPAW_HOME/data" "$PATCHPAW_HOME/locks" "$PATCHPAW_HOME/repos"
   printf persistent-state > "$PATCHPAW_HOME/docker-smoke-marker"
@@ -55,6 +59,14 @@ docker run --rm --volume "$volume:/var/lib/patchpaw" --entrypoint npm "$image" \
   run sync:operation -- --check > "$temp_dir/sync-check.json"
 docker run --rm --volume "$volume:/var/lib/patchpaw" "$image" \
   npm run backup-runtime > "$temp_dir/backup.json"
+if grep -Fq 'PatchPaw: applying versioned builtin asset migrations' "$temp_dir"/*.json; then
+  echo "An operator CLI unexpectedly triggered automatic builtin migrations." >&2
+  exit 1
+fi
+docker run --rm --volume "$volume:/var/lib/patchpaw" "$image" \
+  /bin/sh -ec 'test "$(id -u)" = 10001; test "$HOME" = /home/patchpaw; test -w "$HOME"; printf diagnostic-command' \
+  > "$temp_dir/diagnostic.txt"
+grep -Fq 'diagnostic-command' "$temp_dir/diagnostic.txt"
 
 start_service() {
   local name="$1"
@@ -99,7 +111,9 @@ verify_service() {
   grep -Fq "\"version\":\"${version}\"" "$temp_dir/health.json"
   curl --fail --silent --show-error "http://127.0.0.1:${host_port}/" > "$temp_dir/index.html"
   grep -Eiq '<html([ >])' "$temp_dir/index.html"
-  docker exec "$name" sh -ec 'test "$(id -u)" = 10001; test ! -e /app/.env; test -f "$PATCHPAW_HOME/data/control-plane.db"; test "$(cat "$PATCHPAW_HOME/docker-smoke-marker")" = persistent-state'
+  docker exec "$name" sh -ec 'test "$(id -u)" = 10001; test "$HOME" = /home/patchpaw; test -w "$HOME"; test ! -e /app/.env; test -f "$PATCHPAW_HOME/data/control-plane.db"; test "$(cat "$PATCHPAW_HOME/docker-smoke-marker")" = persistent-state'
+  docker logs "$name" > "$temp_dir/${name}.log" 2>&1
+  grep -Fq 'PatchPaw: applying versioned builtin asset migrations' "$temp_dir/${name}.log"
 
   docker exec "$name" sh -ec '
     root="$(mktemp -d)"

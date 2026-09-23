@@ -119,7 +119,7 @@ Python/Java/Rust/Go 项目分别在 derived image 中安装所需 runtime、comp
 1. 记录 native 服务配置和实际 `PATCHPAW_HOME`，确认没有重要写任务。
 2. 通过现有流程备份 runtime，并单独备份外部 `.env`、GitHub PEM 和 volume 外的凭据。
 3. 停止旧服务，确认没有进程继续访问 runtime home。
-4. Linux 可将旧目录 bind mount 到 `/var/lib/patchpaw`，或复制到 named volume；先解决容器 UID `10001` 的访问权限。
+4. 如果 runtime 中存在可恢复的 paused/awaiting-approval workspace，不能直接搬到不同容器路径：paused state、Git linked worktree metadata 和 approval pointers 可能保存 runtime home 下的绝对路径。切换前必须先安全结束或退役这些暂停工作区，或者实现专门的 relocation migration；不要直接复制后假装仍可 resume。本次 dogfood 选择退役已确认的暂停工作区，不实现通用路径重写。Linux 可将旧目录 bind mount 到 `/var/lib/patchpaw`，或复制到 named volume；先解决容器 UID `10001` 的访问权限。
 5. 启动 Docker 后验证 `/health`、Web 控制台、GitHub/GitLab webhook、Memory、observer 和 outbox。
 6. 确认稳定后再由操作员决定是否移除旧 PM2/systemd 配置。
 

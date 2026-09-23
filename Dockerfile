@@ -46,7 +46,8 @@ RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
 ENV NODE_ENV=production \
     PATCHPAW_HOME=/var/lib/patchpaw \
-    PATCHPAW_LISTEN_HOST=0.0.0.0
+    PATCHPAW_LISTEN_HOST=0.0.0.0 \
+    HOME=/home/patchpaw
 
 VOLUME ["/var/lib/patchpaw"]
 EXPOSE 3000
