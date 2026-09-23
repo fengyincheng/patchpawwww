@@ -10,12 +10,16 @@ export const projectRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 export const configuredRuntimeHome = runtimeHomeFromEnvironment;
 
+export function loadProjectEnvIfPresent(envFilePath = resolve(projectRoot, '.env')) {
+  if (existsSync(envFilePath)) loadEnvFile(envFilePath);
+}
+
 const optionalEnvString = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(value => typeof value === 'string' && !value.trim() ? undefined : value, schema.optional());
 const optionalEnvNumber = z.preprocess(value => typeof value === 'string' && !value.trim() ? undefined : value, z.coerce.number().int().positive().optional());
 
 export function loadConfig() {
   // Absolute path: PM2/restarts do not depend on the caller's working directory.
-  loadEnvFile(resolve(projectRoot, '.env'));
+  loadProjectEnvIfPresent();
   const env = z.object({
     PATCHPAW_GITHUB_APP_ID: optionalEnvNumber,
     PATCHPAW_GITHUB_APP_SLUG: optionalEnvString(z.string().trim().regex(/^[\w.-]+$/)),
@@ -23,6 +27,7 @@ export function loadConfig() {
     PATCHPAW_GITHUB_PRIVATE_KEY_PATH: optionalEnvString(z.string().min(1)),
     PATCHPAW_PUBLIC_ORIGIN: z.url(),
     PATCHPAW_PORT: z.coerce.number().int().min(1).max(65535),
+    PATCHPAW_LISTEN_HOST: optionalEnvString(z.string().trim().min(1)),
     PATCHPAW_GITHUB_TEST_REPO: optionalEnvString(z.string().regex(/^[\w.-]+\/[\w.-]+$/)),
     PATCHPAW_OPERATOR_GITHUB_LOGIN: optionalEnvString(z.string().trim()),
     PATCHPAW_ADMIN_TOKEN: z.string().min(1).optional(),
@@ -68,6 +73,7 @@ export function loadConfig() {
     privateKey: value.PATCHPAW_GITHUB_PRIVATE_KEY_PATH ? readFileSync(resolve(projectRoot, value.PATCHPAW_GITHUB_PRIVATE_KEY_PATH), 'utf8') : '',
     publicOrigin: value.PATCHPAW_PUBLIC_ORIGIN,
     port: value.PATCHPAW_PORT,
+    listenHost: value.PATCHPAW_LISTEN_HOST ?? '127.0.0.1',
     testRepo: value.PATCHPAW_GITHUB_TEST_REPO ?? '',
     operatorLogin: value.PATCHPAW_OPERATOR_GITHUB_LOGIN || undefined,
     adminToken: value.PATCHPAW_ADMIN_TOKEN || undefined,

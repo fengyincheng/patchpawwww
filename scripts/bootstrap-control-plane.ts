@@ -1,8 +1,7 @@
-import { loadEnvFile } from 'node:process';
-import { configuredRuntimeHome, projectRoot } from '../src/config/env.ts';
+import { configuredRuntimeHome, loadProjectEnvIfPresent } from '../src/config/env.ts';
 import { bootstrapControlPlane } from '../src/control-plane/bootstrap.ts';
 
-loadEnvFile(`${projectRoot}/.env`);
+loadProjectEnvIfPresent();
 const explicitRepositories = process.argv.slice(2).map(fullName => ({ fullName }));
 const report = await bootstrapControlPlane({ root: configuredRuntimeHome(), repositories: explicitRepositories.length ? explicitRepositories : undefined });
 console.log(JSON.stringify({

@@ -81,7 +81,7 @@ try {
   await communication.ready;
   const app = buildServer({ ...config, root: runtimeHome, botLogin: config.botLogin, gitlabWebhooks }, github, true,
     comment => dispatchHumanReply(runtimeHome, comment, projectRoot));
-  await app.listen({ host: '127.0.0.1', port: config.port });
+  await app.listen({ host: config.listenHost, port: config.port });
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.once(signal, () => { communication?.stop(); void app.close(); });
   }

@@ -1,5 +1,4 @@
-import { loadEnvFile } from 'node:process';
-import { configuredRuntimeHome, projectRoot } from '../src/config/env.ts';
+import { configuredRuntimeHome, loadProjectEnvIfPresent } from '../src/config/env.ts';
 import { openControlPlaneDb } from '../src/control-plane/db.ts';
 import { BUILTIN_ASSET_MIGRATION_IDS, listBuiltinAssetMigrations, runBuiltinAssetMigrations } from '../src/control-plane/builtin-migrations.ts';
 
@@ -9,7 +8,7 @@ import { BUILTIN_ASSET_MIGRATION_IDS, listBuiltinAssetMigrations, runBuiltinAsse
 // while a deploy may safely install a missing builtin.
 //
 // Without --apply this only reports which migrations are pending.
-loadEnvFile(`${projectRoot}/.env`);
+loadProjectEnvIfPresent();
 
 const apply = process.argv.includes('--apply');
 const db = await openControlPlaneDb(configuredRuntimeHome());

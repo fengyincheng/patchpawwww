@@ -1,7 +1,6 @@
-import { loadEnvFile } from 'node:process';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { configuredRuntimeHome, projectRoot } from '../src/config/env.ts';
+import { configuredRuntimeHome, loadProjectEnvIfPresent, projectRoot } from '../src/config/env.ts';
 import { loadOperation } from '../src/operation/load.ts';
 import { contentDigest } from '../src/control-plane/common.ts';
 import { openControlPlaneDb } from '../src/control-plane/db.ts';
@@ -21,7 +20,7 @@ import { getRepository, listRepositories } from '../src/control-plane/repositori
 //                had when it last agreed with public. That is kept in control_plane_meta
 //                under `operation_sync:repository:<repositoryId>:<slug>`. No branch below
 //                ever overwrites a copy whose digest has moved off its baseline.
-loadEnvFile(`${projectRoot}/.env`);
+loadProjectEnvIfPresent();
 
 const apply = process.argv.includes('--apply');
 const checkOnly = process.argv.includes('--check');

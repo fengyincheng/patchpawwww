@@ -44,12 +44,12 @@
     "openai": "7.10.0",
     "zod": "4.5.4",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "tsx": "4.23.13"
   },
   "devDependencies": {
     "@types/node": "22.20.1",
     "node": "22.23.2",
-    "tsx": "4.23.13",
     "typescript": "7.0.2",
     "@types/react": "19.1.10",
     "@types/react-dom": "19.1.7",
