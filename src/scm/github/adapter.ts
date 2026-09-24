@@ -97,6 +97,10 @@ export class GitHubAdapter implements ScmAdapter {
     };
   }
 
+  workspaceFetchPlan(_changeRequest: ChangeRequestSnapshot) {
+    return { head: { kind: 'origin' as const } };
+  }
+
   async verifyInboundComment(comment: InboundScmComment): Promise<ActorAuthorization> {
     const { owner, repo } = repositoryParts(comment.repositoryPath);
     const [{ data: remoteComment }, { data: permission }, { data: user }] = await Promise.all([

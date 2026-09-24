@@ -34,7 +34,7 @@ async function seedPR(f: Fixture, pr: number, opts: { paused?: boolean; memory?:
   const trace = new Trace(join(f.root, 'seed-trace'));
   const head = (await git(f.remote, ['rev-parse', 'feature'])).stdout.trim();
   await ensureRepo(f.root, 'owner/lab', f.remote, trace);
-  await fetchPRState(f.root, 'owner/lab', { headSha: head, baseRef: 'main' }, trace);
+  await fetchPRState(f.root, 'owner/lab', { headSha: head, baseRef: 'main', headFetch: { kind: 'origin' } }, trace);
   const runId = `seed-run-${pr}`;
   const wsPath = runWorkspacePath(f.root, runId);
   await createWorktree(f.root, 'owner/lab', wsPath, head, trace);
@@ -468,7 +468,7 @@ test('a poisoned paused pointer can never turn /close against the shared reposit
   // The shared repository is completely intact and still usable.
   assert.ok((await stat(cache)).isDirectory());
   assert.equal((await git(cache, ['rev-parse', '--is-bare-repository'])).stdout.trim(), 'true');
-  await fetchPRState(f.root, 'owner/lab', { headSha: seeded.head, baseRef: 'main' }, new Trace(join(f.root, 'seed-trace')));
+  await fetchPRState(f.root, 'owner/lab', { headSha: seeded.head, baseRef: 'main', headFetch: { kind: 'origin' } }, new Trace(join(f.root, 'seed-trace')));
   const probe = runWorkspacePath(f.root, 'probe-after-close');
   await createWorktree(f.root, 'owner/lab', probe, seeded.head, new Trace(join(f.root, 'seed-trace')));
   assert.equal((await git(probe, ['rev-parse', 'HEAD'])).stdout.trim(), seeded.head);

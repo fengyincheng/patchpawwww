@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { git } from './git.ts';
 import type { Trace } from '../harness/trace.ts';
 import { patchpawPaths } from '../config/paths.ts';
+import type { WorkspaceHeadFetch } from '../scm/types.ts';
 import { withFileLock } from '../platform/lock.ts';
 import { safeStorageDirectory } from '../scm/identity.ts';
 
@@ -75,12 +76,17 @@ export async function ensureRepo(root: string, repo: string, cloneUrl: string, t
 // no branch checkout: the exact PR head object plus the current target branch tip, forcing the
 // remote-tracking ref so a rewound base branch is still reflected. Automatic GC stays off while
 // worktrees are active; explicit maintenance is a separate later concern.
-export async function fetchPRState(root: string, repo: string, input: { headSha: string; baseRef: string; sourceRemoteUrl?: string }, trace: Trace, env?: NodeJS.ProcessEnv) {
+export async function fetchPRState(root: string, repo: string, input: { headSha: string; baseRef: string; headFetch: WorkspaceHeadFetch }, trace: Trace, env?: NodeJS.ProcessEnv) {
   const cache = repoCachePath(root, repo);
   return withRepoLock(cache, async () => {
-    if (input.sourceRemoteUrl) await git(cache, ['-c', 'gc.auto=0', 'fetch', '--no-tags', input.sourceRemoteUrl, input.headSha], trace, env);
-    await git(cache, ['-c', 'gc.auto=0', 'fetch', '--no-tags', 'origin', input.headSha,
-      `+refs/heads/${input.baseRef}:refs/remotes/origin/${input.baseRef}`], trace, env);
+    if (input.headFetch.kind === 'remote') {
+      await git(cache, ['-c', 'gc.auto=0', 'fetch', '--no-tags', input.headFetch.url, input.headSha], trace, env);
+      await git(cache, ['-c', 'gc.auto=0', 'fetch', '--no-tags', 'origin',
+        `+refs/heads/${input.baseRef}:refs/remotes/origin/${input.baseRef}`], trace, env);
+    } else {
+      await git(cache, ['-c', 'gc.auto=0', 'fetch', '--no-tags', 'origin', input.headSha,
+        `+refs/heads/${input.baseRef}:refs/remotes/origin/${input.baseRef}`], trace, env);
+    }
     const currentBaseTipSha = (await git(cache, ['rev-parse', `refs/remotes/origin/${input.baseRef}`], trace)).stdout.trim();
     trace.emit('repo_cache_fetched', { repo, head_sha: input.headSha, base_ref: input.baseRef, current_base_tip_sha: currentBaseTipSha });
     return { baseRef: input.baseRef, currentBaseTipSha };

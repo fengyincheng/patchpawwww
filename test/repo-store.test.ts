@@ -27,7 +27,7 @@ test('one shared object database serves many independent worktrees', async () =>
   const cache = await ensureRepo(f.root, 'owner/lab', f.remote, f.trace);
   assert.equal(cache, repoCachePath(f.root, 'owner/lab'));
   assert.equal(cache, join(f.root, 'repos', `${encodeURIComponent('owner/lab')}.git`));
-  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace);
+  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace);
   const wsA = runWorkspacePath(f.root, 'run-a'), wsB = runWorkspacePath(f.root, 'run-b');
   await createWorktree(f.root, 'owner/lab', wsA, f.head, f.trace);
   await createWorktree(f.root, 'owner/lab', wsB, f.main, f.trace);
@@ -62,7 +62,7 @@ test('repository-relative evidence paths reject host paths and traversal', () =>
 test('every run fetches fresh remote state without touching an existing paused worktree', async () => {
   const f = await fixture();
   await ensureRepo(f.root, 'owner/lab', f.remote, f.trace);
-  const first = await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace);
+  const first = await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace);
   assert.deepEqual(first, { baseRef: 'main', currentBaseTipSha: f.main });
   const ws = runWorkspacePath(f.root, 'run-a');
   await createWorktree(f.root, 'owner/lab', ws, f.head, f.trace);
@@ -73,7 +73,7 @@ test('every run fetches fresh remote state without touching an existing paused w
   await writeFile(join(f.remote, 'later.txt'), 'advanced\n');
   await git(f.remote, ['add', '.']); await git(f.remote, ['commit', '-m', 'advance']);
   const advanced = (await git(f.remote, ['rev-parse', 'main'])).stdout.trim();
-  const fetched = await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace);
+  const fetched = await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace);
   assert.deepEqual(fetched, { baseRef: 'main', currentBaseTipSha: advanced });
   assert.equal((await git(cache, ['rev-parse', 'origin/main'])).stdout.trim(), advanced);
   assert.equal((await git(ws, ['rev-parse', 'HEAD'])).stdout.trim(), f.head);
@@ -81,7 +81,7 @@ test('every run fetches fresh remote state without touching an existing paused w
   assert.equal((await git(ws, ['status', '--porcelain'])).stdout.trim(), '?? notes.txt');
   // A rewound (force-pushed) base branch is still reflected: tracking refs update forcibly.
   await git(f.remote, ['update-ref', 'refs/heads/main', f.main]);
-  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace);
+  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace);
   assert.equal((await git(cache, ['rev-parse', 'origin/main'])).stdout.trim(), f.main);
 });
 
@@ -89,8 +89,8 @@ test('concurrent runs on one repo serialize shared-repo metadata without corrupt
   const f = await fixture();
   await ensureRepo(f.root, 'owner/lab', f.remote, f.trace);
   await Promise.all([
-    fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace),
-    fetchPRState(f.root, 'owner/lab', { headSha: f.main, baseRef: 'main' }, f.trace),
+    fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace),
+    fetchPRState(f.root, 'owner/lab', { headSha: f.main, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace),
     ensureRepo(f.root, 'owner/lab', f.remote, f.trace),
   ]);
   await Promise.all(['run-a', 'run-b', 'run-c'].map((run, i) =>
@@ -108,7 +108,7 @@ test('concurrent runs on one repo serialize shared-repo metadata without corrupt
 test('removeWorktree unregisters a disposable workspace and tolerates missing paths', async () => {
   const f = await fixture();
   await ensureRepo(f.root, 'owner/lab', f.remote, f.trace);
-  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace);
+  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace);
   const ws = runWorkspacePath(f.root, 'run-a');
   await createWorktree(f.root, 'owner/lab', ws, f.head, f.trace);
   await writeFile(join(ws, 'dirty.txt'), 'build output\n');
@@ -140,7 +140,7 @@ test('one repo key keeps exactly one cache and reconciles a changed remote URL',
 test('disposal is structurally bounded to real workspace paths and never the shared store', async () => {
   const f = await fixture();
   await ensureRepo(f.root, 'owner/lab', f.remote, f.trace);
-  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace);
+  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace);
   const cache = repoCachePath(f.root, 'owner/lab');
   const memoryDir = join(f.root, 'data/memory'); await mkdir(memoryDir, { recursive: true });
   const memoryFile = join(memoryDir, 'x.db'); await writeFile(memoryFile, 'db\n');
@@ -193,7 +193,7 @@ test('a half-initialized cache converges on the next ensureRepo without reclone'
   assert.deepEqual((await readdir(join(f.root, 'repos'))).filter(name => name.endsWith('.git')),
     [`${encodeURIComponent('owner/lab')}.git`]);
   // The healed cache fetches and serves worktrees normally.
-  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main' }, f.trace);
+  await fetchPRState(f.root, 'owner/lab', { headSha: f.head, baseRef: 'main', headFetch: { kind: 'origin' } }, f.trace);
   const ws = runWorkspacePath(f.root, 'healed-run');
   await createWorktree(f.root, 'owner/lab', ws, f.head, f.trace);
   assert.equal((await git(ws, ['rev-parse', 'HEAD'])).stdout.trim(), f.head);

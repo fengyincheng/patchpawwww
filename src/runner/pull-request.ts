@@ -58,6 +58,8 @@ import { settleApprovalPlanClaim } from './approval-plan-settlement.ts';
 import { runApprovalPlanTask } from './approval-plan-task.ts';
 import { GitHubAdapter } from '../scm/github/adapter.ts';
 import type { ChangeRequestSnapshot, ScmAdapter } from '../scm/types.ts';
+import { saveScmSnapshot } from '../scm/snapshot.ts';
+import { changeRequestRecipients } from '../scm/recipients.ts';
 import type { OutboundConnection } from './outbound.ts';
 
 function isApprovalComment(body: string) {
@@ -185,9 +187,8 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
   };
   const recipients = () => {
     const newCommentIds = new Set(feedback?.new_comment_ids ?? []);
-    return [changeRequest?.author.login, config.operatorLogin ?? repo.split('/')[0],
-      ...(feedback?.comments ?? []).filter(comment => newCommentIds.has(comment.comment_id)).map(comment => comment.author)]
-      .filter((login): login is string => !!login);
+    return changeRequestRecipients(changeRequest, config.operatorLogin,
+      (feedback?.comments ?? []).filter(comment => newCommentIds.has(comment.comment_id)).map(comment => comment.author));
   };
   const deliverComment = (purpose: string, semanticKey: string, body: string, mentions: string[], source: Record<string, string | number | null | undefined> = {}) => {
     if (!scm || !botLogin) throw new Error('SCM adapter and bot identity are required before publishing a task report');
@@ -264,6 +265,7 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
       scm = new GitHubAdapter(pr.client, botLogin);
     }
     changeRequest = await scm.readChangeRequest(projectId, number, { allowClosed: true });
+    snapshotPath = (await saveScmSnapshot(config.snapshotRoot, changeRequest, `run-${runId}`)).path;
     state.current_head_sha = changeRequest.source.sha;
     confirmedRemoteHead = changeRequest.source.sha;
     const adapter = scm;
@@ -340,8 +342,9 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
     // Every run refreshes the one shared object store for this GitHub repo BEFORE the
     // resume/fresh decision; fetching never mutates an existing paused worktree's HEAD/index.
     await ensureRepo(config.root, repo, changeRequest.repository.cloneUrl, trace);
+    const fetchPlan = scm.workspaceFetchPlan(changeRequest);
     const fetchedBase = await fetchPRState(config.root, repo, { headSha: changeRequest.source.sha, baseRef: changeRequest.target.ref,
-      sourceRemoteUrl: changeRequest.source.cloneUrl }, trace, gitAuth(await token(), changeRequest.repository.cloneUrl, 'x-access-token', scm.connection.instanceUrl));
+      headFetch: fetchPlan.head }, trace, gitAuth(await token(), changeRequest.repository.cloneUrl, 'x-access-token', scm.connection.instanceUrl));
     const currentBase = { ref: fetchedBase.baseRef, sha: fetchedBase.currentBaseTipSha };
     const legacyRecovery = await recoverLegacyConflictApproval({
       root: config.root, statePath: path, repo, prNumber: number, runId, executionId, botLogin, trace, state, changeRequest, scm, projectId, currentBase,

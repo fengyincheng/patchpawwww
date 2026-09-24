@@ -24,7 +24,7 @@ async function fixture() {
   const main = (await git(remote, ['rev-parse', 'HEAD'])).stdout.trim();
   const trace = new Trace(join(root, 'first')), path = join(root, 'state/pr.json');
   await ensureRepo(root, 'owner/lab', remote, trace);
-  await fetchPRState(root, 'owner/lab', { headSha: head, baseRef: 'main' }, trace);
+  await fetchPRState(root, 'owner/lab', { headSha: head, baseRef: 'main', headFetch: { kind: 'origin' } }, trace);
   const wsPath = runWorkspacePath(root, 'first');
   await createWorktree(root, 'owner/lab', wsPath, head, trace);
   const ws = await prepareWorkspace({ path: wsPath, headSha: head, baseRef: 'main' }, trace);

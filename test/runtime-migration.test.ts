@@ -50,7 +50,7 @@ async function seedTerminalWorkspace(legacyVar: string, legacyHome: string) {
   const head = (await git(remote, ['rev-parse', 'HEAD'])).stdout.trim();
   const trace = new Trace(join(legacyHome, 'fixture-trace'));
   await ensureRepo(legacyVar, 'owner/repo', remote, trace);
-  await fetchPRState(legacyVar, 'owner/repo', { headSha: head, baseRef: 'main' }, trace);
+  await fetchPRState(legacyVar, 'owner/repo', { headSha: head, baseRef: 'main', headFetch: { kind: 'origin' } }, trace);
   const workspace = join(legacyVar, 'workspaces', 'terminal-run');
   await createWorktree(legacyVar, 'owner/repo', workspace, head, trace);
   await mkdir(join(legacyVar, 'runs', 'terminal-run'), { recursive: true });

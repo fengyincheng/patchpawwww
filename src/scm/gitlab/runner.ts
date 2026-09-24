@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { GitLabClient } from './client.ts';
 import { GitLabAdapter } from './adapter.ts';
-import { saveScmSnapshot } from './snapshot.ts';
 import type { ScmConnection } from '../types.ts';
 import { getScmConnection, SecretStore } from '../../control-plane/index.ts';
 import type { ControlPlaneDb } from '../../control-plane/db.ts';
@@ -154,12 +153,10 @@ export async function runGitLabMergeRequest(config: GitLabWorkerConfig, repo: st
   let context: ScmRunContext;
   try {
     const snapshot = await resolved.adapter.readChangeRequest(resolved.projectId, number, { allowClosed: true });
-    const saved = await saveScmSnapshot(config.snapshotRoot, snapshot, `api-${newRunId()}`);
     context = {
       adapter: resolved.adapter,
       projectId: resolved.projectId,
       snapshot,
-      snapshotPath: saved.path,
       connection: async () => ({ adapter: resolved.adapter, botLogin: resolved.adapter.botLogin }),
     };
   } catch (error) {

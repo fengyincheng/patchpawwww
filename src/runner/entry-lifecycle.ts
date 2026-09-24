@@ -7,6 +7,7 @@ import { needsReviewRecovery, readArtifact } from './review-lifecycle.ts';
 import { patchpawPaths } from '../config/paths.ts';
 import { readState, writeState, type RunState } from './state.ts';
 import { reconcileConflictProposalPublication } from './conflict-proposals.ts';
+import { recipientLogins } from '../scm/recipients.ts';
 
 export type RunnerConfig = { appId?: number; privateKey?: string; snapshotRoot: string; root: string; operatorLogin?: string; appSlug?: string; botLogin?: string };
 type CloseFacts = Pick<RunState, 'closed_at' | 'closed_through_comment_id' | 'close_start_notice_id' | 'close_comment_id' | 'close_mentions' | 'completion_notice_id' | 'completion_notice_status' | 'pending_close_refusal'>;
@@ -46,8 +47,7 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
   if (oldest?.body.includes('/close')) {
     const closeSlug = appSlug ?? botLogin.replace(/\[bot\]$/i, '');
     if (closeSlug && parsePRTask(oldest.body, closeSlug) === 'close') {
-      const [owner, name] = repo.split('/');
-      const mentions = [oldest.author, config.operatorLogin ?? owner].filter((login): login is string => !!login);
+      const mentions = recipientLogins([oldest.author, config.operatorLogin]);
       const projectId = input.projectId ?? repo;
       const prepared = await prepareCloseStart(config, repo, prNumber, path, { comment_id: oldest.comment_id, mentions, bot_login: botLogin, projectId });
       try {
@@ -81,7 +81,7 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
         try {
           const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber, purpose: 'close_refusal',
             semanticKey: 'close-refusal:' + refusal.comment_id, body: closeRefusalBody,
-            mentions: [refusal.author ?? bot].filter((login): login is string => !!login), botLogin: bot,
+            mentions: recipientLogins([refusal.author]), botLogin: bot,
             source: { project_id: input.projectId ?? repo, comment_id: refusal.comment_id } });
           const delivered = await deliverImmediately(config.root, stored, { ...await client(), botLogin: bot });
           if (delivered.item.status === 'delivered') {
