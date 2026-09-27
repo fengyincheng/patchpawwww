@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git } from '../src/workspace/git.ts';
@@ -13,7 +13,7 @@ import { GitLabClient } from '../src/scm/gitlab/client.ts';
 import type { ScmConnection } from '../src/scm/types.ts';
 import { hasHumanReplies, saveHumanReply, readHumanReplies } from '../src/runner/human-feedback.ts';
 import { statePath, readState } from '../src/runner/state.ts';
-import { readCurrentApprovalPlan } from '../src/runner/approval-plans.ts';
+import { approvalPlanDirectory, readCurrentApprovalPlan } from '../src/runner/approval-plans.ts';
 import { patchpawPaths } from '../src/config/paths.ts';
 import { bootstrapControlPlane, closeControlPlaneDb, createCommand, createPrompt, listPrompts, listSkills, openControlPlaneDb, setProviderCredential } from '../src/control-plane/index.ts';
 import { deliverImmediately, listOutbound } from '../src/runner/outbound.ts';
@@ -527,6 +527,35 @@ test('GitLab conflict Approval Plan stays read-only until approval, then pushes 
   assert.ok(fixture.control.apiCalls.some(value => value.path.endsWith('/users/17')));
   assert.ok(fixture.control.apiCalls.some(value => value.path.endsWith('/members/all/17')));
   assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('## Conflict 修复完成')));
+});
+
+test('GitLab /close retires one Approval Plan generation and a fresh Plan accepts /approval', async t => {
+  const fixture = await workerFixture(t, 'conflict', true);
+  await fixture.addComment(100, '@patchpaw /conflict');
+  assert.equal((await runGitLabMergeRequest(fixture.config, repo, 3))?.status, 'awaiting_approval');
+  const oldPlan = (await readCurrentApprovalPlan(fixture.path))!;
+
+  await fixture.addComment(200, '@patchpaw /close');
+  assert.equal((await runGitLabMergeRequest(fixture.config, repo, 3))?.status, 'closed');
+  assert.equal(await readCurrentApprovalPlan(fixture.path), null);
+  await assert.rejects(stat(approvalPlanDirectory(fixture.path)), { code: 'ENOENT' });
+
+  fixture.control.mode = 'conflict';
+  await fixture.addComment(300, '@patchpaw /conflict');
+  const freshResult = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(freshResult?.status, 'awaiting_approval', JSON.stringify(freshResult));
+  const freshPlan = await readCurrentApprovalPlan(fixture.path);
+  assert.equal(freshPlan?.plan.status, 'published');
+  assert.notEqual(freshPlan?.plan.plan_id, oldPlan.plan.plan_id);
+  assert.equal((await readState(fixture.path))?.closed_at, undefined);
+  assert.equal((await readState(fixture.path))?.closed_through_comment_id, 200);
+
+  await fixture.addComment(800, '@patchpaw /approval');
+  const approvalResult = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(approvalResult?.status, 'conflict_completed', JSON.stringify(approvalResult));
+  const approved = await readCurrentApprovalPlan(fixture.path);
+  assert.equal(approved?.approval?.source_comment_id, 800);
+  assert.equal(approved?.approval?.phase, 'completed');
 });
 
 test('GitLab worker /stop aborts the active generation and retains its workspace', async t => {

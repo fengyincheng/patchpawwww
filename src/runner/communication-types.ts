@@ -4,7 +4,7 @@ import type { HumanReply } from '../github/comments.ts';
 export type OutboundKind = 'comment' | 'review';
 export type OutboundStatus = 'pending' | 'sending' | 'pending_retry' | 'blocked' | 'delivered' | 'cancelled_stale';
 export type OutboundLifecycleStatus = 'pending' | 'finalized';
-export const LIFECYCLE_PURPOSES = ['pr_review', 'run_notice', 'conflict_proposal', 'conflict_repair', 'close_start', 'close_completion', 'close_refusal'] as const;
+export const LIFECYCLE_PURPOSES = ['pr_review', 'run_notice', 'approval_plan', 'conflict_proposal', 'conflict_repair', 'close_start', 'close_completion', 'close_refusal'] as const;
 export type LifecyclePurpose = typeof LIFECYCLE_PURPOSES[number];
 
 export interface DeliveryReceipt {

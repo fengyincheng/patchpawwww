@@ -186,7 +186,9 @@ test('retired commands never replay and the next mention starts a fresh generati
   assert.ok(fresh.includes('第二代对话'));
   assert.ok(!fresh.includes('第一代对话'), 'retired comments are not loaded into the new generation');
   assert.ok(!fresh.includes('可以正常沟通'), "the old generation's agent memory is gone");
-  assert.equal((await readState(path))?.closed_through_comment_id, 101, 'the high-water mark survives into the new generation');
+  const freshState = await readState(path);
+  assert.equal(freshState?.closed_at, undefined, 'the generation tombstone does not carry into a fresh generation');
+  assert.equal(freshState?.closed_through_comment_id, 101, 'the high-water mark survives into the new generation');
   assert.ok((await stat(memory)).isFile(), 'the memory database is recreated empty');
   // Closing the second generation repeats the visible sequence and stays harmless.
   const posted = f.calls.filter(c => c.body && c.path.endsWith('/issues/7/comments')).length;

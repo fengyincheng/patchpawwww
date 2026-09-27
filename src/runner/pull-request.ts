@@ -33,11 +33,11 @@ import type { ControlPlaneDb } from '../control-plane/db.ts';
 import type { RuntimeExecution } from '../harness/runtime.ts';
 import { classifyRunFailure, terminalStatusForFailure } from './failures.ts';
 import {
-  CONFLICT_APPROVAL_ENABLED, markCurrentConflictProposalStale,
+  markCurrentConflictProposalStale,
   proposalPointerForState, readCurrentConflictProposal,
 } from './conflict-proposals.ts';
 import {
-  isUnfinishedConflictApproval, readUnfinishedConflictApproval, updateConflictApproval, type ConflictApprovalRecord,
+  readUnfinishedConflictApproval, updateConflictApproval, type ConflictApprovalRecord,
 } from './conflict-approval.ts';
 import { isSameRepoWriteback } from './command-approval.ts';
 import { readCurrentApprovalPlan, readUnfinishedApprovalPlanClaim, type ApprovalPlan, type ApprovalPlanClaim } from './approval-plans.ts';
@@ -94,12 +94,12 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
   let appSlug = config.appSlug ?? config.botLogin?.replace(/\[bot\]$/, '');
   let recoveryTarget: string | undefined;
   let priorConflictProposal: RunState['conflict_proposal'];
-  let approvalRecovery: ConflictApprovalRecord | undefined = await readUnfinishedConflictApproval(path) ?? undefined;
+  let approvalRecovery: ConflictApprovalRecord | undefined;
   // A durable generic ApprovalPlan claim is an ordered PR-local job just like a legacy Conflict
   // Approval. It must wake the runner without a new human comment and must never consume a later
   // comment while it is being recovered.
-  let genericApprovalRecovery = await readUnfinishedApprovalPlanClaim(path);
-  let priorClose: Pick<RunState, 'closed_at' | 'closed_through_comment_id' | 'close_start_notice_id' | 'close_comment_id' | 'close_mentions' | 'completion_notice_id' | 'completion_notice_status' | 'pending_close_refusal'> | undefined;
+  let genericApprovalRecovery: Awaited<ReturnType<typeof readUnfinishedApprovalPlanClaim>> = null;
+  let priorClose: Pick<RunState, 'closed_through_comment_id' | 'close_start_notice_id' | 'close_comment_id' | 'close_mentions' | 'completion_notice_id' | 'completion_notice_status' | 'pending_close_refusal'> | undefined;
   let closeResult: Awaited<ReturnType<typeof runClose>> | undefined;
   const projectId = scmContext?.projectId ?? repo;
   let entryConnection: (() => Promise<OutboundConnection>) | undefined;
@@ -133,6 +133,15 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
     try { return await recoverLockedRun(config, repo, number, recoveryTarget, recoveryConnection); }
     finally { await release(); }
   }
+  try {
+    // Load durable approval work only after entry lifecycle has retired compatibility residue
+    // from historical /close tombstones. Otherwise an old claim could win over the fresh comment.
+    approvalRecovery = await readUnfinishedConflictApproval(path) ?? undefined;
+    genericApprovalRecovery = await readUnfinishedApprovalPlanClaim(path);
+  } catch (error) {
+    await release();
+    throw error;
+  }
   if (!await hasHumanReplies(path) && !approvalRecovery && !genericApprovalRecovery) {
     // Pure outbound retries belong to the independent scheduler. A direct
     // worker invocation must not allocate a new Agent run for them.
@@ -147,8 +156,8 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
   const priorLastPatchpawCommit = priorState?.last_patchpaw_commit ?? null;
   const state: RunState = createRunState({ repo, pr_number: number, run_id: runId, current_head_sha: '', repair_attempts: 0,
     last_patchpaw_commit: null, active: true, pid: process.pid,
-    // Durable /close facts carry into the fresh generation: the retired-comment high-water mark
-    // and a still-pending completion notice are never lost to a state overwrite.
+    // Carry the retired-comment high-water and close communication facts across generations.
+    // `closed_at` belongs only to the tombstone for the generation that /close retired.
     ...(priorClose ?? {}), ...(priorConflictProposal ? { conflict_proposal: priorConflictProposal } : {}) }, 'inspect');
   let inspected: InspectedPR | undefined;
   let snapshotPath: string | undefined = scmContext?.snapshotPath;
@@ -295,18 +304,7 @@ export async function runPullRequest(config: { appId?: number; privateKey?: stri
       : intent.kind === 'control' && intent.control === 'approval' ? 'conflict' : 'conversation';
     activeTask = task;
     approvalRequested = intent.kind === 'control' && intent.control === 'approval';
-    if (approvalRequested && state.closed_at) {
-      if (approvalRecovery && isUnfinishedConflictApproval(approvalRecovery)) {
-        approvalRecord = await updateConflictApproval(path, approvalRecovery.approval_id, {
-          status: 'stale', phase: 'interrupted', rejection_code: 'approval_after_close',
-        }) ?? approvalRecovery;
-      }
-      return await finish('closed', { reason: '该 PR 的 PatchPaw 本地 generation 已 closed；迟到 /approval 评论已退休，不会复活旧的 Proposal、workspace 或 repair。' }, 'closed');
-    }
     if (!['open', 'opened'].includes(changeRequest.state) && !approvalRequested) throw new Error('Change request is not open or has no source repository');
-    if (approvalRequested && !currentApprovalPlan && !CONFLICT_APPROVAL_ENABLED) {
-      return await finish('needs_human', { reason: 'Conflict approval gate is disabled.' });
-    }
     if (intent.kind === 'control' && intent.control === 'close') {
       return await finish('needs_human', { reason: '/close 是机械生命周期命令，但本条评论未能在前置生命周期入口处理；没有启动模型或修复。请重发一次单独的 /close。' });
     }

@@ -106,6 +106,11 @@ function lifecycleRequired(purpose: string) {
   return LIFECYCLE_PURPOSES.includes(purpose as typeof LIFECYCLE_PURPOSES[number]);
 }
 
+// The delivery transition is SQL-owned, but its lifecycle classification comes from the same
+// domain list used when enqueueing and reading old rows. Keep this generated from the union's
+// canonical runtime value so adding a lifecycle purpose cannot silently finalize it on delivery.
+const LIFECYCLE_PURPOSES_SQL = LIFECYCLE_PURPOSES.map(purpose => `'${purpose}'`).join(', ');
+
 function toOutbound(row: Row, dbPath: string): { item: OutboundItem; path: string } {
   const purpose = textValue(row, 'purpose');
   const lifecycleStatus = textValue(row, 'lifecycle_status', lifecycleRequired(purpose) ? 'pending' : 'finalized') as OutboundLifecycleStatus;
@@ -257,9 +262,9 @@ export class CommunicationStore {
   async markOutboundDelivered(deliveryId: string, receipt: OutboundItem['receipt'], now = isoNow()) {
     await this.execute(`UPDATE outbound_delivery SET status = 'delivered', receipt_json = :receipt_json,
       last_error_json = NULL, sending_until_at = NULL, next_attempt_at = :now,
-      lifecycle_status = CASE WHEN purpose IN ('pr_review', 'run_notice', 'conflict_proposal', 'conflict_repair', 'close_start', 'close_completion', 'close_refusal')
+      lifecycle_status = CASE WHEN purpose IN (${LIFECYCLE_PURPOSES_SQL})
         THEN lifecycle_status ELSE 'finalized' END,
-      finalized_at = CASE WHEN purpose IN ('pr_review', 'run_notice', 'conflict_proposal', 'conflict_repair', 'close_start', 'close_completion', 'close_refusal')
+      finalized_at = CASE WHEN purpose IN (${LIFECYCLE_PURPOSES_SQL})
         THEN finalized_at ELSE :now END,
       updated_at = :now WHERE delivery_id = :delivery_id AND status = 'sending'`,
       { delivery_id: deliveryId, receipt_json: receipt ? JSON.stringify(receipt) : null, now });

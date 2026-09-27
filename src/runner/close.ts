@@ -11,6 +11,7 @@ import { closeCommunicationStore, openCommunicationStore } from './communication
 import { patchpawPaths } from '../config/paths.ts';
 import { conflictProposalDirectory } from './conflict-proposals.ts';
 import { isUnfinishedConflictApproval, listConflictApprovals, updateConflictApproval } from './conflict-approval.ts';
+import { approvalPlanDirectory, isUnfinishedApprovalPlanClaim, readCurrentApprovalPlan, updateApprovalPlan, type ApprovalPlanMutablePatch } from './approval-plans.ts';
 
 // /close is a mechanical storage-lifecycle command, never an Agent capability: it retires one
 // PR's PatchPaw-local generation (workspace, runs, memory, snapshots, inbox, state) while the
@@ -125,6 +126,41 @@ async function retireConflictApprovalLifecycle(root: string, repo: string, numbe
   }
 }
 
+// Generic ApprovalPlan has the same close boundary as the legacy conflict approval. Persist the
+// stale/interrupted lifecycle first so a crash before outbox cleanup or sidecar deletion remains
+// fail closed. Delayed finalization is serialized with close by the PR-local run claim.
+export async function retireApprovalPlanLifecycle(root: string, repo: string, number: number, path: string, strictSending = true) {
+  const current = await readCurrentApprovalPlan(path);
+  if (current) {
+    const patch: ApprovalPlanMutablePatch = {};
+    if (current.plan.status !== 'stale' && current.plan.status !== 'superseded') patch.status = 'stale';
+    if (current.approval && isUnfinishedApprovalPlanClaim(current.approval)) {
+      patch.approval = { ...current.approval, phase: 'interrupted', updated_at: new Date().toISOString() };
+    }
+    if (Object.keys(patch).length > 0) await updateApprovalPlan(path, current.plan.plan_revision, patch);
+  }
+
+  for (const stored of await listOutbound(root, { repo, prNumber: number })) {
+    if (stored.item.purpose !== 'approval_plan') continue;
+    if (stored.item.status === 'sending') {
+      if (strictSending) throw new Error('Approval Plan delivery is currently sending; close will retry after its remote POST settles');
+      continue;
+    }
+    // An expired sending lease is ambiguous: the sender may still be completing its remote POST.
+    // Keep the semantic delivery as the retry/idempotency evidence; the stale Plan above cannot
+    // become executable, and a later close pass will finalize its durable outcome.
+    if (stored.item.status === 'pending_retry' && stored.item.last_error?.code === 'sending_lease_expired') continue;
+    if (stored.item.status === 'delivered' || stored.item.status === 'cancelled_stale') {
+      await finalizeDelivery(root, stored);
+      continue;
+    }
+    const cancelled = await cancelOutboundDelivery(root, stored, 'approval_plan_closed');
+    if (cancelled?.status === 'sending' && strictSending) {
+      throw new Error('Approval Plan delivery started while close was retiring it; close will retry after its remote POST settles');
+    }
+  }
+}
+
 // This is deliberately local-only. It records the close intent, deletion inventory and
 // start notice before any installation or App metadata request is attempted.
 export async function prepareCloseStart(config: { root: string; snapshotRoot: string; legacyHome?: string }, repo: string, number: number, path: string,
@@ -158,6 +194,7 @@ export async function prepareCloseStart(config: { root: string; snapshotRoot: st
   // remote POST is already in flight, leave it untouched; the next close retry will reconcile it
   // after the sender's atomic status settles.
   await retireConflictApprovalLifecycle(config.root, repo, number, path, false);
+  await retireApprovalPlanLifecycle(config.root, repo, number, path, false);
   const start = journal.start_notice_id ? undefined : await enqueueCommentDelivery({ root: config.root, repo, prNumber: number, purpose: 'close_start',
     semanticKey: `close-start:${journal.close_comment_id}`, body: closeStartBodyFor(repo, input.connection), mentions: journal.mentions,
     botLogin: input.bot_login, source: { project_id: input.projectId ?? repo, close_comment_id: journal.close_comment_id, closed_through: closedThrough,
@@ -202,11 +239,12 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
     }
   }
 
-  // E. Cleanup in the mandated order: workspace → refs → memory → runs → snapshots → inbox →
-  // tombstone. The shared repository itself is never a deletion target. Workspace disposal
+  // E. Cleanup in the mandated order: approval lifecycles → workspace → refs → memory → runs →
+  // approval sidecars → legacy proposals → snapshots → inbox → tombstone. The shared repository itself is never a deletion target. Workspace disposal
   // converges or throws: a close can never claim completion while a controlled path survives.
   const steps: [string, () => Promise<void>][] = [
     ['conflict_approval', async () => { await retireConflictApprovalLifecycle(config.root, repo, number, path); }],
+    ['approval_plan', async () => { await retireApprovalPlanLifecycle(config.root, repo, number, path); }],
     ['workspace', async () => {
       for (const workspace of journal.workspace_paths) await disposeWorkspacePath(config.root, repo, workspace);
       await rm(`${path}.paused.json`, { force: true });
@@ -216,6 +254,7 @@ export async function runClose(config: { root: string; snapshotRoot: string; leg
     ['refs', async () => {}],
     ['memory', async () => { for (const suffix of ['', '-wal', '-shm']) await removeMemoryFile(`${memoryFile}${suffix}`); }],
     ['runs', async () => { for (const run of journal.run_ids) await rm(join(patchpawPaths(config.root).runs, run), { recursive: true, force: true }); }],
+    ['approval_plans', async () => { await rm(approvalPlanDirectory(path), { recursive: true, force: true }); }],
     ['proposals', async () => { await rm(conflictProposalDirectory(path), { recursive: true, force: true }); }],
     ['snapshots', async () => { await rm(snapshots, { recursive: true, force: true }); }],
     ['inbox', async () => {
