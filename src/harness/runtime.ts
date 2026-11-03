@@ -150,6 +150,8 @@ export function isGitPushCommand(command: string) {
 
 export interface TaskTurnResult {
   text: string;
+  /** Text of the last model step. Intermediate tool-call rounds contribute to `text`, so this is the final answer. */
+  finalText: string;
   finishReason?: string;
   usage?: unknown;
   runId?: string;
@@ -391,8 +393,11 @@ export function createTaskSession(options: TaskOptions) {
     if (phase !== 'stop' && help.requested()) throw new HumanHelpRequested(help.reason());
     if (model.isUnavailable()) throw new ProviderUnavailable();
     if (result.error) throw new Error('Agent runtime error');
+    // A turn can span several tool-call rounds and `result.text` concatenates them all, so only
+    // the last step is what the model offers as its answer; the earlier steps are tool-call narration.
+    const finalText = result.steps.at(-1)?.text ?? result.text;
     return {
-      result: { text: result.text, finishReason: result.finishReason, usage: result.totalUsage, runId: result.runId,
+      result: { text: result.text, finalText, finishReason: result.finishReason, usage: result.totalUsage, runId: result.runId,
         maxOutputTokens: outputBudget.effective, evidencePath, stepCount: result.steps.length, maxSteps },
       facts: {
         text: result.text, finishReason: result.finishReason, stepCount: result.steps.length, maxSteps,
