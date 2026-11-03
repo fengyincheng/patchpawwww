@@ -29,6 +29,11 @@ export async function publishReview(client: Octokit, fullName: string, number: n
   const own = reviews.filter(r => r.user?.type === 'Bot' && r.user.login.toLowerCase() === identity.botLogin.toLowerCase()
     && r.commit_id === sha && r.submitted_at && r.state !== 'PENDING');
   let existing = own.find(r => r.body?.includes(marker));
+  if (!existing && deliveryMarker) {
+    // Before the run-id marker existed, adapter deliveries stored the delivery marker as the run id,
+    // producing a nested run marker. Adopt that exact delivery on retry across the upgrade.
+    existing = own.find(r => r.body?.includes(deliveryMarker));
+  }
   if (!existing && identity.allowLegacy) {
     const legacy = own.filter(r => r.body?.startsWith('## PatchPaw P0 review') && !r.body.includes('<!-- patchpaw:run='));
     // Notification recipients may have changed since deployment. Compare all review content after Head.

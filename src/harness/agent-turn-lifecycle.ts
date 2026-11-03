@@ -2,6 +2,8 @@ export type AgentTurnPhase = 'execution' | 'final_answer' | 'closeout' | 'stop';
 
 export interface AgentTurnFacts {
   text: string;
+  /** Text of the last model step; empty when that step still calls a tool. */
+  finalText: string;
   finishReason?: string;
   stepCount: number;
   maxSteps: number;
@@ -14,8 +16,10 @@ export type AgentTurnCompletion =
   | { kind: 'final_answer_required'; reason: 'deadline' | 'step_budget' }
   | { kind: 'protocol_failure' };
 
-export function evaluateAgentTurnCompletion(facts: AgentTurnFacts): AgentTurnCompletion {
-  if (facts.text.trim()) return { kind: 'completed' };
+export function evaluateAgentTurnCompletion(facts: AgentTurnFacts, requireFinalText: boolean): AgentTurnCompletion {
+  // Opaque natural-language tasks publish only a tool-free final step. Legacy structured repair
+  // keeps the concatenated-text contract so its hard-budget closeout request count is unchanged.
+  if ((requireFinalText ? facts.finalText : facts.text).trim()) return { kind: 'completed' };
   if (facts.deadlineExpired) return { kind: 'final_answer_required', reason: 'deadline' };
   if (facts.stepCount >= facts.maxSteps && facts.lastStepHadToolCall) {
     return { kind: 'final_answer_required', reason: 'step_budget' };

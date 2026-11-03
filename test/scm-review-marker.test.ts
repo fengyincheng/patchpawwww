@@ -40,3 +40,31 @@ test('GitHub adapter review marker records the run id and keeps the delivery mar
   assert.match(body, new RegExp(`<!-- patchpaw:run=${runId}:head=${sha}:kind=review -->`));
   assert.ok(body.includes(deliveryMarker), 'the delivery marker stays its own identity');
 });
+
+test('GitHub adapter adopts a pre-fix review whose run marker wrapped the delivery marker', async () => {
+  const { state, client } = reviewFixture();
+  const oldRunMarker = `<!-- patchpaw:run=${deliveryMarker}:head=${sha}:kind=review -->`;
+  state.reviews.push({
+    id: 99, html_url: 'https://github.test/review/99', commit_id: sha,
+    body: `## PatchPaw review\n\nHead: \`${sha}\`\n\nold body\n\n${oldRunMarker}\n${deliveryMarker}`,
+    user: { login: 'patchpawwww[bot]', type: 'Bot' }, submitted_at: '2026-11-02T17:40:00Z', state: 'COMMENTED',
+  });
+  const adapter = new GitHubAdapter(client, 'patchpawwww[bot]');
+  const receipt = await adapter.publishReview('owner/repo', 2, sha, { body: '# 代码评审\n\n新正文' }, [], deliveryMarker, 'new-run');
+  assert.equal(state.creates, 0, 'a retry must not publish a duplicate review');
+  assert.equal(receipt.reused, true);
+  assert.equal(receipt.id, 99);
+});
+
+test('GitHub adapter does not adopt a review carrying another delivery marker', async () => {
+  const { state, client } = reviewFixture();
+  const otherDelivery = '<!-- patchpaw:delivery=22222222-2222-4222-8222-222222222222 -->';
+  state.reviews.push({
+    id: 100, html_url: 'https://github.test/review/100', commit_id: sha,
+    body: `## PatchPaw review\n\nHead: \`${sha}\`\n\nother body\n\n${otherDelivery}`,
+    user: { login: 'patchpawwww[bot]', type: 'Bot' }, submitted_at: '2026-11-02T17:40:00Z', state: 'COMMENTED',
+  });
+  const adapter = new GitHubAdapter(client, 'patchpawwww[bot]');
+  await adapter.publishReview('owner/repo', 2, sha, { body: '# 代码评审\n\n新正文' }, [], deliveryMarker, 'new-run');
+  assert.equal(state.creates, 1);
+});

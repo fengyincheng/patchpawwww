@@ -17,6 +17,8 @@ import { HumanHelpRequested } from './human-help.ts';
 export async function runNaturalLanguageTask(options: TaskOptions, seed: unknown): Promise<TaskAgentResult> {
   const session = createTaskSession({
     ...options,
+    // This path publishes finalText, so the runtime must use last-step completion semantics too.
+    opaqueOutcome: true,
     templateValues: options.templateValues ?? templateValuesFromSeed(seed),
   });
   try {
