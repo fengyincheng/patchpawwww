@@ -152,9 +152,9 @@ export class GitHubAdapter implements ScmAdapter {
     };
   }
 
-  async publishReview(projectId: string, number: number, headSha: string, review: ReviewPayload, mentions: string[], marker: string) {
+  async publishReview(projectId: string, number: number, headSha: string, review: ReviewPayload, mentions: string[], marker: string, runId: string) {
     const result = await publishGitHubReview(this.client, projectId, number, headSha, review, mentions,
-      { runId: marker, botLogin: this.botLogin, allowLegacy: false }, marker);
+      { runId, botLogin: this.botLogin, allowLegacy: false }, marker);
     return {
       id: result.id, htmlUrl: result.html_url, commitId: result.commit_id ?? undefined,
       publishedAt: result.published_at, reused: result.reused, remoteAdopted: result.reused,

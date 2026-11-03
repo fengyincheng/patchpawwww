@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git } from '../src/workspace/git.ts';
@@ -161,6 +161,26 @@ test('every ordinary repair turn reserves a tool-free final-answer phase after s
   } finally { budget.maxSteps = previous; }
 });
 
+// Issue #5: a step that both narrates and calls a tool must never reach the published body.
+test('opaque review publishes only the last step text and drops earlier tool-call narration', async () => {
+  const options = await fixture();
+  await withProvider([
+    { text: "I'll continue the review. Let me check the current workspace state.", tool: 'mastra_workspace_read_file', args: { path: 'sample.txt', showLineNumbers: true } },
+    { text: 'I need to verify the actual behavior claims.', tool: 'git_diff', args: {} },
+    { text: '# 代码评审\n\n实现与文档一致，无需修改。' },
+  ], async requests => {
+    const result = await runReview({ ...options, opaqueOutcome: true }, {});
+    assert.equal(result.outcome, 'finished');
+    assert.equal('outcome' in result && result.outcome === 'finished'
+      ? result.body : assert.fail('review must finish'), '# 代码评审\n\n实现与文档一致，无需修改。');
+    assert.equal(requests.length, 3);
+    const evidence = (await readdir(options.trace.dir)).filter(name => /-turn-\d+\.json$/.test(name));
+    const saved = JSON.parse(await readFile(join(options.trace.dir, evidence[0]!), 'utf8'));
+    assert.match(saved.text, /I need to verify the actual behavior claims\./,
+      'the trace evidence keeps the full turn text for diagnosis');
+  });
+});
+
 test('custom, review, repair, CI and conflict share the same final-answer fallback contract', async () => {
   const previous = budget.maxSteps; budget.maxSteps = 1;
   const cases = [
@@ -174,7 +194,7 @@ test('custom, review, repair, CI and conflict share the same final-answer fallba
     for (const entry of cases) {
       const options = await fixture();
       await withProvider([
-        { tool: 'mastra_workspace_read_file', args: { path: 'sample.txt', showLineNumbers: true } },
+        { text: `${entry.name} working narration`, tool: 'mastra_workspace_read_file', args: { path: 'sample.txt', showLineNumbers: true } },
         { text: `${entry.name} final answer` },
       ], async requests => {
         const result = await entry.run(options);

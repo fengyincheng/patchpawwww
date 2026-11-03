@@ -17,12 +17,15 @@ import { HumanHelpRequested } from './human-help.ts';
 export async function runNaturalLanguageTask(options: TaskOptions, seed: unknown): Promise<TaskAgentResult> {
   const session = createTaskSession({
     ...options,
+    // This path publishes finalText, so the runtime must use last-step completion semantics too.
+    opaqueOutcome: true,
     templateValues: options.templateValues ?? templateValuesFromSeed(seed),
   });
   try {
     try {
       const result = await session.turnResult(JSON.stringify(seed));
-      const body = result.text.trim();
+      // Earlier rounds of the same turn are tool-call narration; only the last step is the review.
+      const body = result.finalText.trim();
       if (!body) {
         throw new AgentFinalResponseMissing({
           task: options.task, phase: 'execution', finishReason: result.finishReason,

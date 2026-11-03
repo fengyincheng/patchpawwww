@@ -90,7 +90,8 @@ export class GitLabAdapter implements ScmAdapter {
     return { id: Number(data.id), htmlUrl: String(data.web_url ?? data.url ?? ''), publishedAt: String(data.created_at ?? new Date().toISOString()), reused: false };
   }
 
-  async publishReview(projectId: string, number: number, headSha: string, review: ReviewPayload, mentions: string[], marker: string) {
+  // GitLab deduplicates on the delivery marker; the shared interface still carries the run id.
+  async publishReview(projectId: string, number: number, headSha: string, review: ReviewPayload, mentions: string[], marker: string, _runId: string) {
     const body = 'body' in review
       ? `## PatchPaw review\n\n${mentions.map(value => `@${value}`).join(' ')}\n\nHead: \`${headSha}\`\n\n${review.body}\n\n${marker}`
       : `## PatchPaw review\n\n${mentions.map(value => `@${value}`).join(' ')}\n\nHead: \`${headSha}\`\n\n${review.summary}\n\nRecommendation: **${review.recommendation}**\n\n${review.findings.map(f => `- ${f.severity}: ${f.path}:${f.line} — ${f.title}\n  ${f.evidence}`).join('\n')}\n\nLimitations: ${review.limitations.join('; ') || 'None'}\n\n${marker}`;

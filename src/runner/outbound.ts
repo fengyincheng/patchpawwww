@@ -160,7 +160,8 @@ async function send(stored: StoredItem, connection: OutboundConnection) {
       return { id: receipt.id, html_url: receipt.htmlUrl, published_at: receipt.publishedAt, reused: receipt.reused, remote_adopted: receipt.remoteAdopted };
     }
     const payload = item.payload as ReviewPayload;
-    const receipt = await adapter.publishReview(projectId, item.pr_number, payload.head_sha, payload.review, payload.mentions, item.marker);
+    const receipt = await adapter.publishReview(projectId, item.pr_number, payload.head_sha, payload.review, payload.mentions, item.marker,
+      payload.run_id);
     return { id: receipt.id, html_url: receipt.htmlUrl, commit_id: receipt.commitId ?? payload.head_sha, published_at: receipt.publishedAt, reused: receipt.reused, remote_adopted: receipt.remoteAdopted };
   }
   if (!connection.client) throw new Error('GitHub delivery is missing its client');

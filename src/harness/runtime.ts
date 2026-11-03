@@ -150,6 +150,8 @@ export function isGitPushCommand(command: string) {
 
 export interface TaskTurnResult {
   text: string;
+  /** Text of the last model step. Intermediate tool-call rounds contribute to `text`, so this is the final answer. */
+  finalText: string;
   finishReason?: string;
   usage?: unknown;
   runId?: string;
@@ -391,13 +393,18 @@ export function createTaskSession(options: TaskOptions) {
     if (phase !== 'stop' && help.requested()) throw new HumanHelpRequested(help.reason());
     if (model.isUnavailable()) throw new ProviderUnavailable();
     if (result.error) throw new Error('Agent runtime error');
+    // A turn can span several tool-call rounds and `result.text` concatenates them all. Only a
+    // last step that no longer calls a tool is a final answer; text attached to a tool-call step
+    // is working narration, and falling back to `result.text` would republish it.
+    const lastStep = result.steps.at(-1);
+    const finalText = lastStep && lastStep.toolCalls.length === 0 ? (lastStep.text ?? '') : '';
     return {
-      result: { text: result.text, finishReason: result.finishReason, usage: result.totalUsage, runId: result.runId,
+      result: { text: result.text, finalText, finishReason: result.finishReason, usage: result.totalUsage, runId: result.runId,
         maxOutputTokens: outputBudget.effective, evidencePath, stepCount: result.steps.length, maxSteps },
       facts: {
-        text: result.text, finishReason: result.finishReason, stepCount: result.steps.length, maxSteps,
+        text: result.text, finalText, finishReason: result.finishReason, stepCount: result.steps.length, maxSteps,
         deadlineExpired: phase === 'execution' ? signal.aborted : abortSignal.aborted,
-        lastStepHadToolCall: (result.steps.at(-1)?.toolCalls.length ?? 0) > 0,
+        lastStepHadToolCall: (lastStep?.toolCalls.length ?? 0) > 0,
       } satisfies AgentTurnFacts,
     };
   };
@@ -422,7 +429,7 @@ export function createTaskSession(options: TaskOptions) {
         trace.emit('agent_final_answer_completed', { task, turn: index, source, via: 'reserved_tool' });
         return generated.result;
       }
-      const completion = evaluateAgentTurnCompletion(generated.facts);
+      const completion = evaluateAgentTurnCompletion(generated.facts, options.opaqueOutcome === true);
       switch (completion.kind) {
         case 'completed':
           trace.emit('agent_final_answer_completed', { task, turn: index, source, via: 'text' });
@@ -443,7 +450,7 @@ export function createTaskSession(options: TaskOptions) {
   const finishTurn = async (generated: Awaited<ReturnType<typeof generateTurn>>, source?: 'execution_deadline' | 'execution_step_budget') => {
     truncation(generated);
     if (options.stopWhen?.()) return generated.result;
-    const completion = evaluateAgentTurnCompletion(generated.facts);
+    const completion = evaluateAgentTurnCompletion(generated.facts, options.opaqueOutcome === true);
     switch (completion.kind) {
       case 'completed': return generated.result;
       case 'final_answer_required': return finalAnswer(source ?? (completion.reason === 'deadline' ? 'execution_deadline' : 'execution_step_budget'));
