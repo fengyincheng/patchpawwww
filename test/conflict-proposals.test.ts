@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stat, writeFile } from 'node:fs/promises';
+import { cp, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture, type Fixture } from './helpers/pr-fixture.ts';
 import { git } from '../src/workspace/git.ts';
@@ -10,8 +10,10 @@ import { readState, statePath } from '../src/runner/state.ts';
 import { saveHumanReply } from '../src/runner/human-feedback.ts';
 import { attemptDelivery, listOutbound } from '../src/runner/outbound.ts';
 import { finalizeDelayedDelivery } from '../src/runner/communication-scheduler.ts';
+import { closeCommunicationStore, openCommunicationStore } from '../src/runner/communication-store.ts';
 import {
   createApprovalPlan,
+  approvalPlanDirectory,
   readApprovalPlan,
   readApprovalPlanClaim,
   readCurrentApprovalPlan,
@@ -72,6 +74,142 @@ test('fresh Conflict publishes one immutable Approval Plan with a bound receipt 
   await stat(paused!.workspace.path);
 });
 
+test('/close followed by a fresh Approval Plan accepts a new /approval', async t => {
+  const { f, initialHead, path } = await publishedPlan(t);
+  const oldPlan = (await readCurrentApprovalPlan(path))!;
+  const oldWorkspace = oldPlan.plan.workspace_path;
+
+  await f.mention('@patchpawwww /close', 200);
+  assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'closed');
+  assert.equal(await readCurrentApprovalPlan(path), null);
+  await assert.rejects(stat(approvalPlanDirectory(path)), { code: 'ENOENT' });
+  await assert.rejects(stat(oldWorkspace), { code: 'ENOENT' });
+
+  await f.mention('@patchpawwww /conflict', 300);
+  const planResult = await runPullRequest(f.config, 'owner/lab', 7);
+  assert.equal(planResult.status, 'awaiting_approval', JSON.stringify(planResult));
+  const freshPlan = await readCurrentApprovalPlan(path);
+  assert.equal(freshPlan?.plan.status, 'published');
+  assert.notEqual(freshPlan?.plan.plan_id, oldPlan.plan.plan_id);
+  assert.equal(freshPlan?.plan.plan_revision, 1);
+  assert.equal((await readState(path))?.closed_at, undefined);
+  assert.equal((await readState(path))?.closed_through_comment_id, 200);
+
+  f.control.conflictRepair = false;
+  f.control.approvalRepair = true;
+  await f.mention('@patchpawwww /approval', 400);
+  const approvalResult = await runPullRequest(f.config, 'owner/lab', 7);
+  assert.equal(approvalResult.status, 'conflict_completed', JSON.stringify(approvalResult));
+  const approved = await readCurrentApprovalPlan(path);
+  assert.equal(approved?.plan.status, 'approved');
+  assert.equal(approved?.approval?.source_comment_id, 400);
+  assert.equal((await git(f.remote, ['rev-parse', 'feature'])).stdout.trim() === initialHead, false);
+});
+
+test('an /approval after /close cannot revive the retired Approval Plan', async t => {
+  const { f, initialHead, path } = await publishedPlan(t);
+  const oldPlan = (await readCurrentApprovalPlan(path))!;
+  const oldWorkspace = oldPlan.plan.workspace_path;
+  await f.mention('@patchpawwww /close', 200);
+  assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'closed');
+
+  const beforeModel = f.modelInputs.length;
+  await f.mention('@patchpawwww /approval', 300);
+  const result = await runPullRequest(f.config, 'owner/lab', 7);
+  assert.equal(result.status, 'needs_human', JSON.stringify(result));
+  assert.equal(f.modelInputs.length, beforeModel, 'a missing current Plan does not start an Agent turn');
+  assert.equal((await git(f.remote, ['rev-parse', 'feature'])).stdout.trim(), initialHead);
+  assert.equal(await readCurrentApprovalPlan(path), null);
+  await assert.rejects(stat(oldWorkspace), { code: 'ENOENT' });
+  assert.equal((await readState(path))?.closed_through_comment_id, 200);
+});
+
+test('close cancels a pending generic Approval Plan publication before delayed delivery can revive it', async t => {
+  const { f, path } = await pendingPlan(t);
+  const pending = (await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 }))
+    .find(value => value.item.purpose === 'approval_plan')!;
+  assert.equal(pending.item.status, 'pending_retry');
+  f.control.commentStatus = 201;
+  await f.mention('@patchpawwww /close', 200);
+  assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'closed');
+
+  const retired = (await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 }))
+    .find(value => value.item.delivery_id === pending.item.delivery_id)!;
+  assert.equal(retired.item.status, 'cancelled_stale');
+  assert.equal(retired.item.last_error?.code, 'approval_plan_closed');
+  assert.equal(retired.item.lifecycle_status, 'finalized');
+  const connection = { client: createGitHub(f.config).installation(42), botLogin: 'patchpawwww[bot]' };
+  await attemptDelivery(f.root, retired, connection, true);
+  await finalizeDelayedDelivery(f.config, retired, connection);
+  assert.equal((await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 }))
+    .find(value => value.item.delivery_id === pending.item.delivery_id)?.item.status, 'cancelled_stale');
+  assert.equal(await readCurrentApprovalPlan(path), null);
+  await assert.rejects(stat(approvalPlanDirectory(path)), { code: 'ENOENT' });
+});
+
+test('close waits for an in-flight generic Approval Plan POST before deleting its lifecycle', async t => {
+  const { f, path } = await pendingPlan(t);
+  const pending = (await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 }))
+    .find(value => value.item.purpose === 'approval_plan')!;
+  const store = await openCommunicationStore(f.root);
+  try {
+    const sending = await store.claimOutbound(pending.item.delivery_id, new Date().toISOString(),
+      new Date(Date.now() + 30_000).toISOString(), true);
+    assert.equal(sending?.item.status, 'sending');
+  } finally { await closeCommunicationStore(store); }
+
+  f.control.commentStatus = 201;
+  await f.mention('@patchpawwww /close', 200);
+  const firstClose = await runPullRequest(f.config, 'owner/lab', 7);
+  assert.equal(firstClose.status, 'close_start_unpublished', JSON.stringify(firstClose));
+  assert.equal((await readCurrentApprovalPlan(path))?.plan.status, 'stale');
+  assert.equal((await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 }))
+    .find(value => value.item.delivery_id === pending.item.delivery_id)?.item.status, 'sending');
+  assert.ok((await readPaused(path))?.workspace.path, 'the in-flight POST keeps destructive cleanup behind the retry boundary');
+
+  const settled = await openCommunicationStore(f.root);
+  try {
+    await settled.markOutboundDelivered(pending.item.delivery_id, { id: 901, html_url: 'https://github.com/owner/lab/pull/7#issuecomment-901',
+      published_at: new Date().toISOString() });
+  } finally { await closeCommunicationStore(settled); }
+  assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'closed');
+  assert.equal(await readCurrentApprovalPlan(path), null);
+  await assert.rejects(stat(approvalPlanDirectory(path)), { code: 'ENOENT' });
+});
+
+test('a historical closed tombstone retires leftover Approval Plan claims before a fresh comment', async t => {
+  const { f, path } = await publishedPlan(t);
+  const historicalPlan = (await readCurrentApprovalPlan(path))!;
+  const timestamp = new Date().toISOString();
+  await updateApprovalPlan(path, historicalPlan.plan.plan_revision, {
+    status: 'approved',
+    approval: { plan_id: historicalPlan.plan.plan_id, plan_revision: historicalPlan.plan.plan_revision,
+      body_sha256: historicalPlan.plan.body_sha256, source_event_id: 'historical-approval-event', source_comment_id: 150,
+      author: 'operator', author_association: 'OWNER', accepted_at: timestamp,
+      claim_run_id: 'historical-approval-run', phase: 'running', updated_at: timestamp },
+  });
+  const legacySidecar = `${path}.legacy-approval-plans`;
+  await cp(approvalPlanDirectory(path), legacySidecar, { recursive: true });
+
+  await f.mention('@patchpawwww /close', 200);
+  assert.equal((await runPullRequest(f.config, 'owner/lab', 7)).status, 'closed');
+  assert.equal(await readCurrentApprovalPlan(path), null);
+  await cp(legacySidecar, approvalPlanDirectory(path), { recursive: true });
+  await rm(legacySidecar, { recursive: true, force: true });
+  assert.equal((await readCurrentApprovalPlan(path))?.approval?.phase, 'running');
+
+  await f.mention('@patchpawwww /conflict', 300);
+  const result = await runPullRequest(f.config, 'owner/lab', 7);
+  assert.equal(result.status, 'awaiting_approval', JSON.stringify(result));
+  const freshPlan = await readCurrentApprovalPlan(path);
+  assert.equal(freshPlan?.plan.status, 'published');
+  assert.notEqual(freshPlan?.plan.plan_id, historicalPlan.plan.plan_id);
+  assert.equal(freshPlan?.plan.plan_revision, 1);
+  assert.equal(freshPlan?.approval, undefined);
+  assert.equal((await readState(path))?.closed_at, undefined);
+  assert.equal((await readState(path))?.closed_through_comment_id, 200);
+});
+
 test('fresh Approval Plan uses provenance, approved-write context, and Harness-owned commit/push/writeback', async t => {
   const { f, initialHead, path } = await publishedPlan(t);
   f.control.conflictRepair = false;
@@ -109,6 +247,7 @@ test('generic Approval Plan publication retry finalizes the same receipt without
   assert.equal(retried?.item.status, 'delivered');
   const delivered = (await listOutbound(f.root, { repo: 'owner/lab', prNumber: 7 }))
     .find(value => value.item.delivery_id === pending!.item.delivery_id)!;
+  assert.equal(delivered.item.lifecycle_status, 'pending', 'the delivered Plan still needs lifecycle finalization');
   await finalizeDelayedDelivery(f.config, delivered, connection);
   assert.equal(f.modelInputs.length, beforeModel);
   assert.equal((await git(f.remote, ['rev-parse', 'feature'])).stdout.trim(), initialHead);

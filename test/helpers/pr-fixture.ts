@@ -47,6 +47,7 @@ export async function fixture(t: TestContext, initialMention = true, mode: Fixtu
     dropReviewAcknowledgement: false, reviewNeedsHelp: false, redAlways: false, repeatRepair: false,
     freshRepairToolPending: false,
     stopOnPublish: false, stopOnPoll: false, stopOnModel: false, stopReportFails: false, conflictRepair: false, approvalRepair: false, conflictRevision: false, humanConflict: false, pauseConflict: false, closeoutFails: false, mainSha: undefined as string | undefined, prHeadRepo: 'owner/lab' as string | null,
+    prHeadCloneUrl: undefined as string | undefined, prHeadSequence: undefined as string[] | undefined,
     holdModel: undefined as undefined | (() => Promise<void>) };
   const publishedReviews: any[] = [];
   const publishedComments: any[] = [];
@@ -163,7 +164,7 @@ export async function fixture(t: TestContext, initialMention = true, mode: Fixtu
     if (path === '/repos/owner/lab') return control.captureFails ? json({ message: 'Fixture inspection failure' }, 403)
       : json({ id: 10, full_name: 'owner/lab', private: true, clone_url: cloneUrl });
     if (path === '/repos/owner/lab/pulls/7') return json({ number: 7, state: 'open', title: 'Fixture', body: '', user: { login: control.prAuthor },
-      html_url: 'https://github.com/owner/lab/pull/7', base: { ref: 'main', sha: control.mainSha ?? base, repo: { id: 10 } }, head: { sha: head, ref: 'feature', repo: control.prHeadRepo ? { id: control.prHeadRepo === 'owner/lab' ? 10 : 11, full_name: control.prHeadRepo, clone_url: cloneUrl } : null } });
+      html_url: 'https://github.com/owner/lab/pull/7', base: { ref: 'main', sha: control.mainSha ?? base, repo: { id: 10 } }, head: { sha: control.prHeadSequence?.shift() ?? head, ref: 'feature', repo: control.prHeadRepo ? { id: control.prHeadRepo === 'owner/lab' ? 10 : 11, full_name: control.prHeadRepo, clone_url: control.prHeadCloneUrl ?? cloneUrl } : null } });
     if (path === '/repos/owner/lab/branches/main') return json({ commit: { sha: control.mainSha ?? base } });
     if (path.endsWith('/check-runs')) return json({ total_count: 1, check_runs: [{ name: 'unit', status: 'completed', conclusion: control.redAlways || head === base ? 'failure' : 'success', html_url: 'https://github.com/owner/lab/actions/runs/9' }] });
     if (path.endsWith('/status')) return json({ state: 'pending', statuses: [] });

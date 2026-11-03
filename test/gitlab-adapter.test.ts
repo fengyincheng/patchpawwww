@@ -28,6 +28,8 @@ test('GitLab adapter snapshots fork source metadata and checks member authorizat
   const snapshot = await adapter.readChangeRequest('88', 3);
   assert.equal(snapshot.source.projectId, '99');
   assert.equal(snapshot.source.cloneUrl, 'https://git.example/fork/repo.git');
+  assert.deepEqual(adapter.workspaceFetchPlan(snapshot), { head: { kind: 'remote', url: 'https://git.example/fork/repo.git' } });
+  assert.deepEqual(adapter.workspaceFetchPlan({ ...snapshot, source: { ...snapshot.source, projectId: '88' } }), { head: { kind: 'origin' } });
   const auth = await adapter.verifyInboundComment({ platform: 'gitlab', connectionId: 'prod', projectId: '88', storageKey: 'gitlab:prod:project:88', repositoryPath: 'group/repo', changeRequestNumber: 3, remoteId: 501, authorId: '17', authorLogin: 'dev', body: '@patchpaw /review', url: 'https://git.example/note', sourceEventId: 'hook-1' });
   assert.equal(auth.canExecute, true);
 });

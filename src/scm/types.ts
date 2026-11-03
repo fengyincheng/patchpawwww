@@ -52,6 +52,14 @@ export interface ChangeRequestSnapshot {
   sourceEventId?: string;
 }
 
+export type WorkspaceHeadFetch =
+  | { kind: 'origin' }
+  | { kind: 'remote'; url: string };
+
+export interface WorkspaceFetchPlan {
+  head: WorkspaceHeadFetch;
+}
+
 export interface InboundScmComment {
   platform: ScmKind;
   connectionId: string;
@@ -115,6 +123,7 @@ export interface ScmAdapter {
   readonly botLogin: string;
   readonly botUserId?: string;
   readChangeRequest(projectId: string, number: number, options?: { allowClosed?: boolean }): Promise<ChangeRequestSnapshot>;
+  workspaceFetchPlan(changeRequest: ChangeRequestSnapshot): WorkspaceFetchPlan;
   verifyInboundComment(comment: InboundScmComment): Promise<ActorAuthorization>;
   listComments(projectId: string, number: number): Promise<Array<{ id: number; author: string; authorId: string; body: string; url: string; createdAt?: string; system?: boolean }>>;
   publishComment(projectId: string, number: number, body: string, markers: string[]): Promise<ScmDeliveryReceipt>;

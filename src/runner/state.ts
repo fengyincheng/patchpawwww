@@ -12,9 +12,9 @@ export interface RunState {
   active: boolean; pid: number;
   handled_comment_ids?: number[];
   execution_id?: number;
-  // /close local-generation tombstone facts. closed_through_comment_id is a durable high-water
-  // mark: comments retired by /close can never execute again even if GitHub redelivers them
-  // after the inbox was cleaned; it survives into the next fresh conversation generation.
+  // `closed_at` is tombstone-only: it records that this local generation ended. It is not carried
+  // into a fresh generation. `closed_through_comment_id` is a durable cross-generation high-water
+  // mark: comments retired by /close can never execute again even if SCM redelivers them later.
   closed_at?: string;
   closed_through_comment_id?: number;
   close_start_notice_id?: number;

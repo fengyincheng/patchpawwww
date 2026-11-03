@@ -1,15 +1,18 @@
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hasHumanReplies, readHumanReplies } from './human-feedback.ts';
 import { parsePRTask } from './command.ts';
-import { prepareCloseStart, preparePendingCloseStart, runClose, retryPendingCloseCompletion, hasPendingClose, resumePendingClose, closeRefusalBody } from './close.ts';
+import { prepareCloseStart, preparePendingCloseStart, retireApprovalPlanLifecycle, runClose, retryPendingCloseCompletion, hasPendingClose, resumePendingClose, closeRefusalBody } from './close.ts';
 import { deferDelivery, deliverImmediately, enqueueCommentDelivery, requeueOldestBlockedDelivery, type OutboundConnection } from './outbound.ts';
 import { needsReviewRecovery, readArtifact } from './review-lifecycle.ts';
 import { patchpawPaths } from '../config/paths.ts';
 import { readState, writeState, type RunState } from './state.ts';
 import { reconcileConflictProposalPublication } from './conflict-proposals.ts';
+import { recipientLogins } from '../scm/recipients.ts';
+import { approvalPlanDirectory } from './approval-plans.ts';
 
 export type RunnerConfig = { appId?: number; privateKey?: string; snapshotRoot: string; root: string; operatorLogin?: string; appSlug?: string; botLogin?: string };
-type CloseFacts = Pick<RunState, 'closed_at' | 'closed_through_comment_id' | 'close_start_notice_id' | 'close_comment_id' | 'close_mentions' | 'completion_notice_id' | 'completion_notice_status' | 'pending_close_refusal'>;
+type CloseCarryForward = Pick<RunState, 'closed_through_comment_id' | 'close_start_notice_id' | 'close_comment_id' | 'close_mentions' | 'completion_notice_id' | 'completion_notice_status' | 'pending_close_refusal'>;
 
 export interface EntryLifecycleInput {
   config: RunnerConfig;
@@ -27,7 +30,7 @@ export interface EntryLifecycleResult {
   botLogin: string;
   closeResult?: Awaited<ReturnType<typeof runClose>>;
   recoveryTarget?: string;
-  priorClose?: CloseFacts;
+  priorClose?: CloseCarryForward;
   priorConflictProposal?: RunState['conflict_proposal'];
 }
 
@@ -36,18 +39,24 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
   let { appSlug, botLogin } = input;
   let closeResult: Awaited<ReturnType<typeof runClose>> | undefined;
   let recoveryTarget: string | undefined;
-  let priorClose: CloseFacts | undefined;
+  let priorClose: CloseCarryForward | undefined;
   let priorConflictProposal: RunState['conflict_proposal'];
   const connection = input.resolveConnection;
   const previous = await readState(path);
+  // Older releases wrote `closed_at` tombstones without retiring generic ApprovalPlan
+  // sidecars/outbox rows. Converge that residue before loading approval claims or accepting a
+  // fresh comment. Retirement is idempotent and contains no model, workspace, or SCM write.
+  if (previous?.phase === 'closed' && previous.closed_at) {
+    await retireApprovalPlanLifecycle(config.root, repo, prNumber, path);
+    await rm(approvalPlanDirectory(path), { recursive: true, force: true });
+  }
   if (await hasHumanReplies(path)) await requeueOldestBlockedDelivery(config.root, repo, prNumber);
   const handledIds = new Set(previous?.handled_comment_ids ?? []);
   const oldest = (await readHumanReplies(path)).find(comment => comment.comment_id > (previous?.closed_through_comment_id ?? 0) && !handledIds.has(comment.comment_id));
   if (oldest?.body.includes('/close')) {
     const closeSlug = appSlug ?? botLogin.replace(/\[bot\]$/i, '');
     if (closeSlug && parsePRTask(oldest.body, closeSlug) === 'close') {
-      const [owner, name] = repo.split('/');
-      const mentions = [oldest.author, config.operatorLogin ?? owner].filter((login): login is string => !!login);
+      const mentions = recipientLogins([oldest.author, config.operatorLogin]);
       const projectId = input.projectId ?? repo;
       const prepared = await prepareCloseStart(config, repo, prNumber, path, { comment_id: oldest.comment_id, mentions, bot_login: botLogin, projectId });
       try {
@@ -81,7 +90,7 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
         try {
           const stored = await enqueueCommentDelivery({ root: config.root, repo, prNumber, purpose: 'close_refusal',
             semanticKey: 'close-refusal:' + refusal.comment_id, body: closeRefusalBody,
-            mentions: [refusal.author ?? bot].filter((login): login is string => !!login), botLogin: bot,
+            mentions: recipientLogins([refusal.author]), botLogin: bot,
             source: { project_id: input.projectId ?? repo, comment_id: refusal.comment_id } });
           const delivered = await deliverImmediately(config.root, stored, { ...await client(), botLogin: bot });
           if (delivered.item.status === 'delivered') {
@@ -98,9 +107,10 @@ export async function prepareEntryLifecycle(input: EntryLifecycleInput): Promise
   }
   if (!closeResult) {
     const current = await readState(path);
-    const { closed_at, closed_through_comment_id, close_start_notice_id, close_comment_id, close_mentions, completion_notice_id, completion_notice_status, pending_close_refusal } = current ?? {};
-    if (closed_at || closed_through_comment_id || completion_notice_status || pending_close_refusal) {
-      priorClose = { closed_at, closed_through_comment_id, close_start_notice_id, close_comment_id, close_mentions,
+    const { closed_through_comment_id, close_start_notice_id, close_comment_id, close_mentions, completion_notice_id, completion_notice_status, pending_close_refusal } = current ?? {};
+    if (closed_through_comment_id !== undefined || close_start_notice_id !== undefined || close_comment_id !== undefined
+      || close_mentions !== undefined || completion_notice_id !== undefined || completion_notice_status !== undefined || pending_close_refusal !== undefined) {
+      priorClose = { closed_through_comment_id, close_start_notice_id, close_comment_id, close_mentions,
         completion_notice_id, completion_notice_status, pending_close_refusal };
     }
     priorConflictProposal = current?.conflict_proposal;

@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git } from '../src/workspace/git.ts';
@@ -13,7 +13,7 @@ import { GitLabClient } from '../src/scm/gitlab/client.ts';
 import type { ScmConnection } from '../src/scm/types.ts';
 import { hasHumanReplies, saveHumanReply, readHumanReplies } from '../src/runner/human-feedback.ts';
 import { statePath, readState } from '../src/runner/state.ts';
-import { readCurrentApprovalPlan } from '../src/runner/approval-plans.ts';
+import { approvalPlanDirectory, readCurrentApprovalPlan } from '../src/runner/approval-plans.ts';
 import { patchpawPaths } from '../src/config/paths.ts';
 import { bootstrapControlPlane, closeControlPlaneDb, createCommand, createPrompt, listPrompts, listSkills, openControlPlaneDb, setProviderCredential } from '../src/control-plane/index.ts';
 import { deliverImmediately, listOutbound } from '../src/runner/outbound.ts';
@@ -38,6 +38,7 @@ function sendJson(response: ServerResponse, result: ReturnType<typeof json>) {
 
 async function createRemote(root: string, conflict: boolean) {
   const source = join(root, 'source'); const projects = join(root, 'projects'); const bare = join(projects, 'group/repo.git');
+  const forkBare = join(projects, 'other/repo.git'); const forkSource = join(root, 'fork-source');
   await mkdir(source); await mkdir(join(projects, 'group'), { recursive: true });
   await git(source, ['init', '-b', 'main']);
   await git(source, ['config', 'user.name', 'Fixture']); await git(source, ['config', 'user.email', 'fixture@localhost']);
@@ -50,7 +51,13 @@ async function createRemote(root: string, conflict: boolean) {
   }
   await git(source, ['init', '--bare', bare]);
   await git(source, ['remote', 'add', 'fixture', bare]); await git(source, ['push', 'fixture', 'main', 'feature']);
-  return { source, projects, bare, base };
+  await mkdir(join(projects, 'other'), { recursive: true }); await git(source, ['init', '--bare', forkBare]);
+  await git(root, ['clone', '--branch', 'feature', bare, forkSource]);
+  await git(forkSource, ['config', 'user.name', 'Fork Fixture']); await git(forkSource, ['config', 'user.email', 'fork@localhost']);
+  await writeFile(join(forkSource, 'fork-only.txt'), 'source project head\n');
+  await git(forkSource, ['add', 'fork-only.txt']); await git(forkSource, ['commit', '-m', 'Fork-only source commit']);
+  await git(forkSource, ['remote', 'add', 'fork', forkBare]); await git(forkSource, ['push', 'fork', 'HEAD:feature']);
+  return { source, projects, bare, forkBare, base };
 }
 
 interface WorkerControl {
@@ -103,6 +110,7 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
   if (!address || typeof address === 'string') throw new Error('Fixture server did not expose a TCP address');
   instanceUrl = `http://127.0.0.1:${address.port}/gitlab`;
   const cloneUrl = `${instanceUrl}/group/repo.git`;
+  const sourceCloneUrl = `${instanceUrl}/other/repo.git`;
   const path = statePath(patchpawPaths(root).state, repo, 3);
   const control: WorkerControl = { mode, customMode: 'harness-commit', customStep: 0, fork: false, driftApplied: false, modelCalls: 0, normalModelCalls: 0, repairStep: 0, holdNormalModel: false,
     mrState: 'opened', nextNoteId: 700, remoteNotes: [], failNotePublication: false, apiCalls: [], mrReads: [] };
@@ -135,6 +143,7 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
   const seedTrace = new Trace(join(root, 'seed-trace'));
   await ensureRepo(root, repo, cloneUrl, seedTrace);
   await git(repoCachePath(root, repo), ['config', `url.${remote.bare}.insteadOf`, cloneUrl], seedTrace);
+  await git(repoCachePath(root, repo), ['config', `url.${remote.forkBare}.insteadOf`, sourceCloneUrl], seedTrace);
   const modelReady = new Promise<void>(resolve => { control.modelStarted = resolve; });
   const modelReleased = new Promise<void>(resolve => { control.releaseNormalModel = resolve; });
   const advanceRemoteBranch = async (branch: 'feature' | 'main') => {
@@ -220,9 +229,10 @@ async function workerFixture(t: TestContext, mode: WorkerControl['mode'], confli
         return sendJson(response, json({ id: control.botIdentity?.id ?? 900, username: control.botIdentity?.username ?? 'patchpaw', bot: true, state: 'active' }));
       }
       if (url.pathname === '/gitlab/api/v4/projects/88') return sendJson(response, json({ id: 88, path_with_namespace: 'group/repo', web_url: `${instanceUrl}/group/repo`, http_url_to_repo: cloneUrl }));
-      if (url.pathname === '/gitlab/api/v4/projects/99') return sendJson(response, json({ id: 99, path_with_namespace: 'other/repo', web_url: `${instanceUrl}/other/repo`, http_url_to_repo: cloneUrl }));
+      if (url.pathname === '/gitlab/api/v4/projects/99') return sendJson(response, json({ id: 99, path_with_namespace: 'other/repo', web_url: `${instanceUrl}/other/repo`, http_url_to_repo: sourceCloneUrl }));
       if (url.pathname === '/gitlab/api/v4/projects/88/merge_requests/3') {
-        const head = (await git(remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+        const headRemote = control.fork ? remote.forkBare : remote.bare;
+        const head = (await git(headRemote, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
         const main = (await git(remote.bare, ['rev-parse', 'refs/heads/main'])).stdout.trim();
         control.mrReads.push({ sha: head, targetSha: main });
         return sendJson(response, json({ iid: 3, state: control.mrState, source_project_id: control.fork ? 99 : 88, target_project_id: 88, source: { path_with_namespace: control.fork ? 'other/repo' : 'group/repo' },
@@ -278,8 +288,31 @@ test('GitLab worker review publishes a durable review on the current head', asyn
   assert.equal(result?.status, 'review_completed');
   assert.equal((await readState(fixture.path))?.phase, 'review_completed');
   assert.equal(fixture.control.normalModelCalls, 1);
+  const runId = (await readState(fixture.path))?.run_id;
+  const trace = (await readFile(join(fixture.root, 'runs', runId!, 'trace.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const fetches = trace.filter(event => event.event === 'git' && event.args.includes('fetch'));
+  assert.ok(fetches.some(event => event.args.includes('origin') && event.args.some((arg: string) => arg.startsWith('+refs/heads/main:'))));
+  assert.ok(fetches.every(event => !event.args.includes(`${fixture.config.gitlabConnections[0]!.instanceUrl}/other/repo.git`)), 'same-project MR does not fetch a source remote');
   const review = fixture.control.remoteNotes.find(note => note.author.id === 900 && note.body.includes('## PatchPaw review'));
   assert.ok(review); assert.ok(review.body.includes(expectedHead));
+});
+
+test('GitLab cross-project read-only Review fetches source head and target base from different remotes', async t => {
+  const fixture = await workerFixture(t, 'review'); fixture.control.fork = true;
+  await fixture.addComment(100, '@patchpaw /review');
+  const sourceHead = (await git(fixture.remote.forkBare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const targetHead = (await git(fixture.remote.bare, ['rev-parse', 'refs/heads/feature'])).stdout.trim();
+  const result = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(result?.status, 'review_completed');
+  assert.notEqual(sourceHead, targetHead, 'source-only commit is absent from target remote');
+  assert.equal((await readState(fixture.path))?.current_head_sha, sourceHead);
+  assert.equal(fixture.control.normalModelCalls, 1);
+  const runId = (await readState(fixture.path))?.run_id;
+  const events = (await readFile(join(fixture.root, 'runs', runId!, 'trace.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const fetches = events.filter(event => event.event === 'git' && event.args.includes('fetch'));
+  assert.ok(fetches.some(event => event.args.includes(`${fixture.config.gitlabConnections[0]!.instanceUrl}/other/repo.git`) && event.args.includes(sourceHead)));
+  assert.ok(fetches.some(event => event.args.includes('origin') && event.args.some((arg: string) => arg.startsWith('+refs/heads/main:'))));
+  assert.ok(fetches.every(event => !(event.args.includes('origin') && event.args.includes(sourceHead))), 'source head is never requested from target origin');
 });
 
 test('GitLab worker repair pushes only the same-project source branch before publishing completion', async t => {
@@ -494,6 +527,35 @@ test('GitLab conflict Approval Plan stays read-only until approval, then pushes 
   assert.ok(fixture.control.apiCalls.some(value => value.path.endsWith('/users/17')));
   assert.ok(fixture.control.apiCalls.some(value => value.path.endsWith('/members/all/17')));
   assert.ok(fixture.control.remoteNotes.some(note => note.author.id === 900 && note.body.includes('## Conflict 修复完成')));
+});
+
+test('GitLab /close retires one Approval Plan generation and a fresh Plan accepts /approval', async t => {
+  const fixture = await workerFixture(t, 'conflict', true);
+  await fixture.addComment(100, '@patchpaw /conflict');
+  assert.equal((await runGitLabMergeRequest(fixture.config, repo, 3))?.status, 'awaiting_approval');
+  const oldPlan = (await readCurrentApprovalPlan(fixture.path))!;
+
+  await fixture.addComment(200, '@patchpaw /close');
+  assert.equal((await runGitLabMergeRequest(fixture.config, repo, 3))?.status, 'closed');
+  assert.equal(await readCurrentApprovalPlan(fixture.path), null);
+  await assert.rejects(stat(approvalPlanDirectory(fixture.path)), { code: 'ENOENT' });
+
+  fixture.control.mode = 'conflict';
+  await fixture.addComment(300, '@patchpaw /conflict');
+  const freshResult = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(freshResult?.status, 'awaiting_approval', JSON.stringify(freshResult));
+  const freshPlan = await readCurrentApprovalPlan(fixture.path);
+  assert.equal(freshPlan?.plan.status, 'published');
+  assert.notEqual(freshPlan?.plan.plan_id, oldPlan.plan.plan_id);
+  assert.equal((await readState(fixture.path))?.closed_at, undefined);
+  assert.equal((await readState(fixture.path))?.closed_through_comment_id, 200);
+
+  await fixture.addComment(800, '@patchpaw /approval');
+  const approvalResult = await runGitLabMergeRequest(fixture.config, repo, 3);
+  assert.equal(approvalResult?.status, 'conflict_completed', JSON.stringify(approvalResult));
+  const approved = await readCurrentApprovalPlan(fixture.path);
+  assert.equal(approved?.approval?.source_comment_id, 800);
+  assert.equal(approved?.approval?.phase, 'completed');
 });
 
 test('GitLab worker /stop aborts the active generation and retains its workspace', async t => {

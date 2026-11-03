@@ -34,7 +34,7 @@ async function seedPR(f: Fixture, pr: number, opts: { paused?: boolean; memory?:
   const trace = new Trace(join(f.root, 'seed-trace'));
   const head = (await git(f.remote, ['rev-parse', 'feature'])).stdout.trim();
   await ensureRepo(f.root, 'owner/lab', f.remote, trace);
-  await fetchPRState(f.root, 'owner/lab', { headSha: head, baseRef: 'main' }, trace);
+  await fetchPRState(f.root, 'owner/lab', { headSha: head, baseRef: 'main', headFetch: { kind: 'origin' } }, trace);
   const runId = `seed-run-${pr}`;
   const wsPath = runWorkspacePath(f.root, runId);
   await createWorktree(f.root, 'owner/lab', wsPath, head, trace);
@@ -186,7 +186,9 @@ test('retired commands never replay and the next mention starts a fresh generati
   assert.ok(fresh.includes('第二代对话'));
   assert.ok(!fresh.includes('第一代对话'), 'retired comments are not loaded into the new generation');
   assert.ok(!fresh.includes('可以正常沟通'), "the old generation's agent memory is gone");
-  assert.equal((await readState(path))?.closed_through_comment_id, 101, 'the high-water mark survives into the new generation');
+  const freshState = await readState(path);
+  assert.equal(freshState?.closed_at, undefined, 'the generation tombstone does not carry into a fresh generation');
+  assert.equal(freshState?.closed_through_comment_id, 101, 'the high-water mark survives into the new generation');
   assert.ok((await stat(memory)).isFile(), 'the memory database is recreated empty');
   // Closing the second generation repeats the visible sequence and stays harmless.
   const posted = f.calls.filter(c => c.body && c.path.endsWith('/issues/7/comments')).length;
@@ -468,7 +470,7 @@ test('a poisoned paused pointer can never turn /close against the shared reposit
   // The shared repository is completely intact and still usable.
   assert.ok((await stat(cache)).isDirectory());
   assert.equal((await git(cache, ['rev-parse', '--is-bare-repository'])).stdout.trim(), 'true');
-  await fetchPRState(f.root, 'owner/lab', { headSha: seeded.head, baseRef: 'main' }, new Trace(join(f.root, 'seed-trace')));
+  await fetchPRState(f.root, 'owner/lab', { headSha: seeded.head, baseRef: 'main', headFetch: { kind: 'origin' } }, new Trace(join(f.root, 'seed-trace')));
   const probe = runWorkspacePath(f.root, 'probe-after-close');
   await createWorktree(f.root, 'owner/lab', probe, seeded.head, new Trace(join(f.root, 'seed-trace')));
   assert.equal((await git(probe, ['rev-parse', 'HEAD'])).stdout.trim(), seeded.head);

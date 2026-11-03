@@ -48,6 +48,13 @@ export class GitLabAdapter implements ScmAdapter {
       author: { id: mr.author?.id === undefined ? null : String(mr.author.id), login: String(mr.author?.username ?? mr.author?.name ?? '') }, receivedAt: new Date().toISOString() };
   }
 
+  workspaceFetchPlan(changeRequest: ChangeRequestSnapshot) {
+    if (changeRequest.source.projectId === changeRequest.target.projectId) return { head: { kind: 'origin' as const } };
+    const url = changeRequest.source.cloneUrl;
+    if (!url) throw new Error('GitLab cross-project MR is missing a source clone URL');
+    return { head: { kind: 'remote' as const, url } };
+  }
+
   async verifyInboundComment(comment: InboundScmComment): Promise<ActorAuthorization> {
     if (comment.connectionId !== this.connection.id || (!this.connection.projectIds.includes(String(comment.projectId)) && !this.connection.projectIds.includes(comment.repositoryPath))) {
       throw Object.assign(new Error('GitLab project is not registered on this connection'), { status: 403 });

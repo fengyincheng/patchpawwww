@@ -8,6 +8,7 @@ import { patchpawPaths } from '../config/paths.ts';
 import { readState, statePath } from './state.ts';
 import { reviewPayloadSchema } from '../tasks/review/result.ts';
 import { runNoticeBody, type RunNotice } from './run-notice.ts';
+import { recipientLogins } from '../scm/recipients.ts';
 
 export interface LegacyReconciliationConfig {
   root: string;
@@ -90,7 +91,7 @@ export async function reconcileLegacyOutbox(config: LegacyReconciliationConfig, 
       const headSha = stringValue(review.head_sha);
       if (!headSha) throw new Error(`Legacy review artifact is missing head_sha: ${dir}`);
       const { head_sha: _headSha, ...reviewPayload } = review;
-      const mentions = [stringValue(manifest?.request_author), config.operatorLogin ?? repo.split('/')[0]].filter((value): value is string => !!value);
+      const mentions = recipientLogins([stringValue(manifest?.request_author), config.operatorLogin]);
       await enqueueReviewDelivery({ root: config.root, repo, prNumber, semanticKey: `review:${runId}:${headSha}`,
         headSha, review: reviewPayloadSchema.parse(reviewPayload), mentions, botLogin, runId, allowLegacy: true,
         source: { run_id: runId, head_sha: headSha, recovered: 1 } });
@@ -100,7 +101,7 @@ export async function reconcileLegacyOutbox(config: LegacyReconciliationConfig, 
     if (noticeRaw && notification?.status !== 'published') {
       const notice = parseRunNotice(noticeRaw);
       await enqueueCommentDelivery({ root: config.root, repo, prNumber, purpose: 'run_notice',
-        semanticKey: `run-notice:${notice.run_id}`, body: runNoticeBody(notice), mentions: notice.mentions,
+        semanticKey: `run-notice:${notice.run_id}`, body: runNoticeBody(notice), mentions: recipientLogins(notice.mentions),
         botLogin: notice.bot_login ?? botLogin,
         legacyMarkers: ['budget_exhausted', 'stopped'].includes(notice.status) ? [closeoutMarker(notice.run_id)] : undefined,
         source: { run_id: notice.run_id, status: notice.status } });
@@ -110,7 +111,7 @@ export async function reconcileLegacyOutbox(config: LegacyReconciliationConfig, 
   for (const path of await legacyStatePaths(config.root)) {
     const state = await readState(path);
     if (!state?.repo || !state.pr_number) continue;
-    const mentions = state.close_mentions ?? [state.repo.split('/')[0]];
+    const mentions = recipientLogins(state.close_mentions ?? []);
     if (state.completion_notice_status === 'pending' && state.closed_through_comment_id) {
       await enqueueCommentDelivery({ root: config.root, repo: state.repo, prNumber: state.pr_number, purpose: 'close_completion',
         semanticKey: `close-completion:${state.close_comment_id ?? state.closed_through_comment_id}`, body: closeCompleteBodyFor(state.repo), mentions,
@@ -120,7 +121,7 @@ export async function reconcileLegacyOutbox(config: LegacyReconciliationConfig, 
       await enqueueCommentDelivery({ root: config.root, repo: state.repo, prNumber: state.pr_number, purpose: 'close_refusal',
         semanticKey: `close-refusal:${state.pending_close_refusal.comment_id}`,
         body: '当前任务仍在运行，请先 /stop，再执行 /close。',
-        mentions: [state.pending_close_refusal.author ?? state.repo.split('/')[0]], botLogin,
+        mentions: recipientLogins([state.pending_close_refusal.author]), botLogin,
         source: { comment_id: state.pending_close_refusal.comment_id } });
     }
     const journal = await json(`${path}.close.json`);
@@ -128,7 +129,7 @@ export async function reconcileLegacyOutbox(config: LegacyReconciliationConfig, 
       const closeCommentId = typeof journal.close_comment_id === 'string' || typeof journal.close_comment_id === 'number'
         ? journal.close_comment_id : null;
       await enqueueCommentDelivery({ root: config.root, repo: state.repo, prNumber: state.pr_number, purpose: 'close_start',
-        semanticKey: `close-start:${String(closeCommentId ?? '')}`, body: closeStartBodyFor(state.repo), mentions: strings(journal.mentions), botLogin,
+        semanticKey: `close-start:${String(closeCommentId ?? '')}`, body: closeStartBodyFor(state.repo), mentions: recipientLogins(strings(journal.mentions)), botLogin,
         source: { close_comment_id: closeCommentId } });
     }
   }

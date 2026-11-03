@@ -32,7 +32,7 @@ async function fixture() {
   const repo = 'gitlab:self-hosted:project:88';
   const trace = new Trace(join(root, 'seed-trace'));
   await ensureRepo(root, repo, remote, trace);
-  await fetchPRState(root, repo, { headSha: head, baseRef: 'main' }, trace);
+  await fetchPRState(root, repo, { headSha: head, baseRef: 'main', headFetch: { kind: 'origin' } }, trace);
   await createWorktree(root, repo, runWorkspacePath(root, 'seed-run'), head, trace);
   const path = statePath(patchpawPaths(root).state, repo, 3);
   const workspace = runWorkspacePath(root, 'seed-run');

@@ -13,7 +13,7 @@ import { nodeExit, nodeFileExists } from './helpers/portable-commands.ts';
 // merge/index preparation inside it — never a standalone per-run clone.
 async function shared(storeRoot: string, remote: string, trace: Trace, head: string, runId: string, mergeBase?: boolean) {
   await ensureRepo(storeRoot, 'owner/lab', remote, trace);
-  await fetchPRState(storeRoot, 'owner/lab', { headSha: head, baseRef: 'main' }, trace);
+  await fetchPRState(storeRoot, 'owner/lab', { headSha: head, baseRef: 'main', headFetch: { kind: 'origin' } }, trace);
   const path = runWorkspacePath(storeRoot, runId);
   await createWorktree(storeRoot, 'owner/lab', path, head, trace);
   return prepareWorkspace({ path, headSha: head, baseRef: 'main', mergeBase }, trace);
